@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 import voluptuous as vol
+from bleak.backends.device import BLEDevice
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigFlow
@@ -18,6 +20,7 @@ from .const import DEFAULT_NAME, DOMAIN
 from .coordinator import is_ac500_service_info
 
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _normalize_address(address: str) -> str:
@@ -38,6 +41,11 @@ def _title_from_service_info(service_info: bluetooth.BluetoothServiceInfoBleak |
     return service_info.name or service_info.device.name or DEFAULT_NAME
 
 
+def _display_name(name: str, address: str) -> str:
+    """Return a user-facing name with a short MAC suffix."""
+    return f"{name} ({address[-8:]})"
+
+
 def _discovered_ac500_devices(hass) -> dict[str, str]:
     """Return all currently discovered AC500 devices."""
     devices: dict[str, str] = {}
@@ -45,7 +53,7 @@ def _discovered_ac500_devices(hass) -> dict[str, str]:
         if not is_ac500_service_info(service_info):
             continue
         address = _normalize_address(service_info.address)
-        devices[address] = f"{_title_from_service_info(service_info)} ({address})"
+        devices[address] = f"{_display_name(_title_from_service_info(service_info), address)} - {address}"
     return dict(sorted(devices.items(), key=lambda item: item[1]))
 
 
@@ -58,12 +66,14 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._discovered_name = DEFAULT_NAME
         self._address: str | None = None
+        self._ble_device: BLEDevice | None = None
 
     @callback
-    def _set_target(self, address: str, name: str) -> None:
+    def _set_target(self, address: str, name: str, ble_device: BLEDevice | None = None) -> None:
         """Store the current target device."""
         self._address = _normalize_address(address)
-        self._discovered_name = name or DEFAULT_NAME
+        self._discovered_name = _display_name(name or DEFAULT_NAME, self._address)
+        self._ble_device = ble_device
 
     @callback
     def _pair_schema(self) -> vol.Schema:
@@ -77,17 +87,17 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle bluetooth discovery."""
         address = _normalize_address(discovery_info.address)
         name = _title_from_service_info(discovery_info)
-        self._set_target(address, name)
+        self._set_target(address, name, discovery_info.device)
         await self.async_set_unique_id(address)
         self._abort_if_unique_id_configured(
             updates={
                 CONF_ADDRESS: address,
-                CONF_NAME: name,
+                CONF_NAME: self._discovered_name,
             }
         )
 
         self.context["title_placeholders"] = {
-            "name": name,
+            "name": self._discovered_name,
             "address": address,
         }
         return await self.async_step_confirm_bluetooth()
@@ -133,7 +143,11 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                 address,
                 connectable=True,
             )
-            self._set_target(address, _title_from_service_info(service_info))
+            self._set_target(
+                address,
+                _title_from_service_info(service_info),
+                service_info.device if service_info else None,
+            )
             await self.async_set_unique_id(address)
             self._abort_if_unique_id_configured(
                 updates={
@@ -171,7 +185,11 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     address,
                     connectable=True,
                 )
-                self._set_target(address, _title_from_service_info(service_info))
+                self._set_target(
+                    address,
+                    _title_from_service_info(service_info),
+                    service_info.device if service_info else None,
+                )
                 await self.async_set_unique_id(address)
                 self._abort_if_unique_id_configured(
                     updates={
@@ -198,6 +216,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     self.hass,
                     self._address,
                     self._discovered_name,
+                    ble_device=self._ble_device,
                 )
             except HomeAssistantError as err:
                 message = str(err).lower()
@@ -205,10 +224,12 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "device_not_found"
                 elif "pairing acknowledgement" in message:
                     errors["base"] = "pairing_failed"
-                elif "backend pairing failed" in message:
-                    errors["base"] = "pairing_backend_failed"
                 else:
                     errors["base"] = "cannot_connect"
+                    _LOGGER.warning("AC500 pairing for %s failed: %s", self._address, err)
+            except Exception:  # pragma: no cover - defensive UX fallback
+                _LOGGER.exception("Unexpected AC500 setup error for %s", self._address)
+                errors["base"] = "cannot_connect"
             else:
                 return self.async_create_entry(
                     title=self._discovered_name,
