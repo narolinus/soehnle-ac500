@@ -7,6 +7,7 @@ import contextlib
 import logging
 from typing import Any
 
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
@@ -62,19 +63,7 @@ class AC500SetupClient:
                 "The AC500 is currently not visible via a connectable Bluetooth adapter or proxy."
             )
 
-        self.client = await establish_connection(
-            BleakClientWithServiceCache,
-            ble_device,
-            self.name,
-            ble_device_callback=self._resolve_ble_device,
-            max_attempts=3,
-            timeout=30.0,
-            pair=True,
-            use_services_cache=False,
-        )
-        get_services = getattr(self.client, "get_services", None)
-        if callable(get_services):
-            await get_services()
+        self.client = await self._async_connect_with_fallbacks(ble_device)
         await self.client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
         await self.client.start_notify(ACK_CHAR_UUID, self._handle_ack)
         return self
@@ -102,6 +91,44 @@ class AC500SetupClient:
                 err,
             )
             return self.last_status
+
+    async def _async_connect_with_fallbacks(self, ble_device: BLEDevice) -> Any:
+        """Connect using the HA bluetooth stack, then fall back to direct Bleak."""
+        first_error: Exception | None = None
+
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                ble_device,
+                self.name,
+                ble_device_callback=self._resolve_ble_device,
+                max_attempts=3,
+                timeout=30.0,
+                pair=True,
+                use_services_cache=False,
+            )
+            get_services = getattr(client, "get_services", None)
+            if callable(get_services):
+                await get_services()
+            return client
+        except Exception as err:
+            first_error = err
+            _LOGGER.warning(
+                "HA bluetooth connect for %s failed during setup, retrying with direct BleakClient: %s",
+                self.address,
+                err,
+            )
+
+        try:
+            client = BleakClient(self.address, pair=True, timeout=30.0)
+            await client.connect()
+            return client
+        except Exception as err:
+            if first_error is not None:
+                raise HomeAssistantError(
+                    f"Connecting to the AC500 failed via Home Assistant Bluetooth and direct BlueZ: {first_error} / {err}"
+                ) from err
+            raise
 
     async def async_run_pairing_handshake(self, timeout: float = 25.0) -> None:
         """Run the AC500 pairing handshake over EF03."""
