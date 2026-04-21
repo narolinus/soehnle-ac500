@@ -21,11 +21,11 @@
       },
       "confirm_bluetooth": {
         "title": "{name} einrichten",
-        "description": "Ein sichtbarer AC500 wurde unter {address} erkannt. Fahre fort, um Pairing zu starten und das Gerat zu Home Assistant hinzuzufugen."
+        "description": "Ein sichtbarer AC500 wurde unter {address} erkannt. {details}. Fahre fort, um Pairing zu starten und das Gerat zu Home Assistant hinzuzufugen."
       },
       "pair": {
         "title": "{name} koppeln",
-        "description": "Versetze den AC500 unter {address} in den Pairing-Modus und drucke seine Bluetooth-Taste. Danach sende diesen Schritt ab. Die Integration fuhrt das Pairing und den Handshake aus und schliesst die Einrichtung ab."
+        "description": "Versetze den AC500 unter {address} in den Pairing-Modus und drucke seine Bluetooth-Taste. Danach sende diesen Schritt ab. {details}. Die Integration fuhrt das Pairing und den Handshake aus und schliesst die Einrichtung ab."
       }
     },
     "error": {

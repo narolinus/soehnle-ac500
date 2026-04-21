@@ -87,8 +87,16 @@ class AC500SetupClient:
         """Run pairing and return an initial status frame."""
         await self._async_pair_backend_if_supported()
         await self.async_run_pairing_handshake()
-        await self.async_enter_control_mode()
-        return await self.async_request_status()
+        try:
+            await self.async_enter_control_mode()
+            return await self.async_request_status()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "AC500 pairing for %s completed, but the immediate post-pair control session failed: %s",
+                self.address,
+                err,
+            )
+            return self.last_status
 
     async def _async_pair_backend_if_supported(self) -> None:
         """Ask the underlying backend to pair if it can."""

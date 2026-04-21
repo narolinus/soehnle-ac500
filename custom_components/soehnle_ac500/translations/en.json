@@ -21,11 +21,11 @@
       },
       "confirm_bluetooth": {
         "title": "Set up {name}",
-        "description": "A visible AC500 was discovered at {address}. Continue to start pairing and add it to Home Assistant."
+        "description": "A visible AC500 was discovered at {address}. {details}. Continue to start pairing and add it to Home Assistant."
       },
       "pair": {
         "title": "Pair {name}",
-        "description": "To pair the AC500 at {address}, put the purifier into pairing mode and press its Bluetooth button, then submit this step. The integration will run the pairing handshake and finish setup."
+        "description": "To pair the AC500 at {address}, put the purifier into pairing mode and press its Bluetooth button, then submit this step. {details}. The integration will run the pairing handshake and finish setup."
       }
     },
     "error": {
