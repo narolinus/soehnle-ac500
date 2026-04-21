@@ -1,0 +1,41 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Soehnle AC500",
+        "description": "Choose whether you want to select a visible AC500 or enter its Bluetooth MAC address manually."
+      },
+      "scan": {
+        "title": "Visible AC500 devices",
+        "description": "Select one of the AC500 purifiers currently visible via Home Assistant Bluetooth.",
+        "data": {
+          "address": "Visible device"
+        }
+      },
+      "manual": {
+        "title": "Enter Bluetooth MAC address",
+        "description": "Enter the Bluetooth MAC address of the AC500 you want to set up.",
+        "data": {
+          "address": "Bluetooth address"
+        }
+      },
+      "confirm_bluetooth": {
+        "title": "Set up {name}",
+        "description": "A visible AC500 was discovered at {address}. Continue to start pairing and add it to Home Assistant."
+      },
+      "pair": {
+        "title": "Pair {name}",
+        "description": "To pair the AC500 at {address}, put the purifier into pairing mode and press its Bluetooth button, then submit this step. The integration will run the pairing handshake and finish setup."
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the AC500.",
+      "device_not_found": "The AC500 is currently not visible via a connectable Bluetooth adapter or proxy.",
+      "invalid_mac": "Enter a valid Bluetooth MAC address in the form AA:BB:CC:DD:EE:FF.",
+      "no_bluetooth_scanner": "Home Assistant currently has no connectable Bluetooth adapter or proxy available.",
+      "no_devices_found": "No visible AC500 devices are currently available.",
+      "pairing_backend_failed": "The Bluetooth backend could not complete pairing.",
+      "pairing_failed": "The AC500 pairing handshake did not complete. Put the purifier into pairing mode, press the Bluetooth button, and try again."
+    }
+  }
+}

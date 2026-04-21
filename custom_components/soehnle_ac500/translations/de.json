@@ -1,0 +1,41 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Soehnle AC500 hinzufugen",
+        "description": "Wahle, ob du einen sichtbaren AC500 auswahlen oder seine Bluetooth-MAC-Adresse manuell eingeben mochtest."
+      },
+      "scan": {
+        "title": "Sichtbare AC500-Gerate",
+        "description": "Wahle einen AC500-Luftfilter aus, der aktuell uber Home Assistant Bluetooth sichtbar ist.",
+        "data": {
+          "address": "Sichtbares Gerat"
+        }
+      },
+      "manual": {
+        "title": "Bluetooth-MAC-Adresse eingeben",
+        "description": "Gib die Bluetooth-MAC-Adresse des AC500 ein, den du einrichten mochtest.",
+        "data": {
+          "address": "Bluetooth-Adresse"
+        }
+      },
+      "confirm_bluetooth": {
+        "title": "{name} einrichten",
+        "description": "Ein sichtbarer AC500 wurde unter {address} erkannt. Fahre fort, um Pairing zu starten und das Gerat zu Home Assistant hinzuzufugen."
+      },
+      "pair": {
+        "title": "{name} koppeln",
+        "description": "Versetze den AC500 unter {address} in den Pairing-Modus und drucke seine Bluetooth-Taste. Danach sende diesen Schritt ab. Die Integration fuhrt das Pairing und den Handshake aus und schliesst die Einrichtung ab."
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum AC500 konnte nicht hergestellt werden.",
+      "device_not_found": "Der AC500 ist aktuell uber keinen connectablen Bluetooth-Adapter oder Proxy sichtbar.",
+      "invalid_mac": "Bitte eine gultige Bluetooth-MAC-Adresse im Format AA:BB:CC:DD:EE:FF eingeben.",
+      "no_bluetooth_scanner": "Home Assistant hat aktuell keinen connectablen Bluetooth-Adapter oder Proxy verfugbar.",
+      "no_devices_found": "Aktuell sind keine sichtbaren AC500-Gerate verfugbar.",
+      "pairing_backend_failed": "Das Bluetooth-Backend konnte das Pairing nicht abschliessen.",
+      "pairing_failed": "Der Pairing-Handshake des AC500 wurde nicht abgeschlossen. Versetze das Gerat in den Pairing-Modus, drucke die Bluetooth-Taste und versuche es erneut."
+    }
+  }
+}
