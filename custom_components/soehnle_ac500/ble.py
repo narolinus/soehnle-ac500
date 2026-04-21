@@ -66,9 +66,15 @@ class AC500SetupClient:
             BleakClientWithServiceCache,
             ble_device,
             self.name,
+            ble_device_callback=self._resolve_ble_device,
             max_attempts=3,
-            timeout=20.0,
+            timeout=30.0,
+            pair=True,
+            use_services_cache=False,
         )
+        get_services = getattr(self.client, "get_services", None)
+        if callable(get_services):
+            await get_services()
         await self.client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
         await self.client.start_notify(ACK_CHAR_UUID, self._handle_ack)
         return self
@@ -85,7 +91,6 @@ class AC500SetupClient:
 
     async def async_pair_and_initialize(self) -> AC500Status | None:
         """Run pairing and return an initial status frame."""
-        await self._async_pair_backend_if_supported()
         await self.async_run_pairing_handshake()
         try:
             await self.async_enter_control_mode()
@@ -97,26 +102,6 @@ class AC500SetupClient:
                 err,
             )
             return self.last_status
-
-    async def _async_pair_backend_if_supported(self) -> None:
-        """Ask the underlying backend to pair if it can."""
-        if self.client is None:
-            raise HomeAssistantError("The AC500 is not connected")
-
-        pair_method = getattr(self.client, "pair", None)
-        if not callable(pair_method):
-            return
-
-        try:
-            await asyncio.wait_for(pair_method(), timeout=15.0)
-        except TimeoutError:
-            _LOGGER.warning("Backend pairing for %s timed out", self.address)
-            return
-        except Exception as err:
-            _LOGGER.warning("Backend pairing for %s failed: %s", self.address, err)
-            return
-
-        await asyncio.sleep(0.5)
 
     async def async_run_pairing_handshake(self, timeout: float = 25.0) -> None:
         """Run the AC500 pairing handshake over EF03."""
