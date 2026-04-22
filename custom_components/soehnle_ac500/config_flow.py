@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -243,16 +244,60 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def _async_stop_existing_coordinator(self) -> bool:
+        """Stop a running coordinator for this device, if any.
+
+        BlueZ gives exclusive notification file descriptors — if the
+        coordinator already holds them, no second client can subscribe.
+        Returns True if a coordinator was stopped (so we can restart it
+        if pairing fails).
+        """
+        assert self._address is not None
+        domain_data: dict = self.hass.data.get(DOMAIN, {})
+        for entry_id, coordinator in list(domain_data.items()):
+            if (
+                hasattr(coordinator, "manager")
+                and getattr(coordinator.manager, "address", None) == self._address
+            ):
+                _LOGGER.debug(
+                    "AC500 config flow: stopping coordinator for %s "
+                    "to free BlueZ notification FDs",
+                    self._address,
+                )
+                await coordinator.async_stop()
+                return True
+        return False
+
+    async def _async_restart_existing_coordinator(self) -> None:
+        """Restart a previously stopped coordinator for this device."""
+        assert self._address is not None
+        domain_data: dict = self.hass.data.get(DOMAIN, {})
+        for entry_id, coordinator in list(domain_data.items()):
+            if (
+                hasattr(coordinator, "manager")
+                and getattr(coordinator.manager, "address", None) == self._address
+            ):
+                _LOGGER.debug(
+                    "AC500 config flow: restarting coordinator for %s",
+                    self._address,
+                )
+                await coordinator.async_start()
+                return
+
     async def async_step_pair(self, user_input: dict[str, Any] | None = None):
         """Set up the AC500 — connect and run the pairing handshake."""
         assert self._address is not None
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # Single connection attempt: connect, pair, and verify in one go.
-            # We do NOT do a separate verify-before-pair step because each
-            # connection attempt takes up to 30 s × 3 retries through the HA
-            # Bluetooth stack.
+            # Stop any running coordinator for this device first.
+            # BlueZ's AcquireNotify gives exclusive FDs — if the coordinator
+            # already holds them, our start_notify will fail with
+            # "NotPermitted: Notify acquired".
+            coordinator_was_running = await self._async_stop_existing_coordinator()
+            # Give BlueZ a moment to release the FDs after stopping.
+            await asyncio.sleep(0.5)
+
             try:
                 await async_pair_ac500(
                     self.hass,
@@ -275,10 +320,17 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                 else:
                     errors["base"] = "cannot_connect"
                 _LOGGER.warning("AC500 pairing for %s failed: %s", self._address, err)
+                # Restart the coordinator if we stopped it and pairing failed.
+                if coordinator_was_running:
+                    await self._async_restart_existing_coordinator()
             except Exception:  # pragma: no cover - defensive UX fallback
                 _LOGGER.exception("Unexpected AC500 setup error for %s", self._address)
                 errors["base"] = "cannot_connect"
+                if coordinator_was_running:
+                    await self._async_restart_existing_coordinator()
             else:
+                # SUCCESS — coordinator will be recreated by async_setup_entry
+                # when the new config entry is loaded.
                 return self.async_create_entry(
                     title=self._discovered_name,
                     data={
