@@ -49,12 +49,15 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Minimum reconnect delay to avoid tight retry loops.
-_MIN_RECONNECT_DELAY = 2.0
-_MAX_RECONNECT_DELAY = 60.0
+# Reconnect timing.
+_MIN_RECONNECT_DELAY = 4.0
+_MAX_RECONNECT_DELAY = 120.0
 
 # How many consecutive keepalive failures before we drop the session.
 _KEEPALIVE_FAIL_LIMIT = 3
+
+# BLE connection timeout — keep short to avoid blocking proxy slots.
+_CONNECT_TIMEOUT = 15.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -220,21 +223,19 @@ class AC500ConnectionManager:
         async with self._operation_lock:
             await self._async_ensure_connected()
 
-            # Re-enter control mode before sending the command, just like the
-            # CLI does in command_fan.
+            # Re-enter control mode before sending the command.
             await self._async_enter_control_mode_unlocked()
 
             if self._last_status is not None and self._last_status.auto_enabled:
-                await self._async_send_frame_unlocked(
+                await self._async_write_frame_unlocked(
                     *PROTOCOL_AUTO_COMMANDS["off"],
-                    expect_status=False,
                 )
                 await self._async_wait_for_status(
                     lambda status: not status.auto_enabled,
                     timeout=5.0,
                 )
 
-            await self._async_send_frame_unlocked(*FAN_COMMANDS[level], expect_status=False)
+            await self._async_write_frame_unlocked(*FAN_COMMANDS[level])
             status = await self._async_wait_for_status(
                 lambda result, expected=level: result.fan_label == expected and not result.auto_enabled,
                 timeout=5.0,
@@ -255,7 +256,7 @@ class AC500ConnectionManager:
         self._ack_event.clear()
 
         _LOGGER.debug("Starting AC500 EF03 handshake for %s", self.address)
-        await self._async_send_frame_unlocked(0xA2, 0x00, 0x03, expect_status=False)
+        await self._async_write_frame_unlocked(0xA2, 0x00, 0x03)
         ack = await self._async_wait_for_ack(expected_ack, timeout=timeout)
         if ack != expected_ack:
             raise HomeAssistantError(
@@ -264,7 +265,7 @@ class AC500ConnectionManager:
 
         _LOGGER.debug("Received AC500 pairing ack from %s", self.address)
         await asyncio.sleep(0.1)
-        await self._async_send_frame_unlocked(0xA2, 0x00, 0x01, expect_status=False)
+        await self._async_write_frame_unlocked(0xA2, 0x00, 0x01)
         await asyncio.sleep(0.3)
         self._handshake_done = True
 
@@ -272,56 +273,49 @@ class AC500ConnectionManager:
         """Send a command and wait until the status reflects it.
 
         Mirrors the CLI pattern: re-enter control mode (AF 00 01) before each
-        command to ensure the device is ready to accept writes.
+        command to ensure the device is ready to accept writes.  Confirmation
+        comes from the EF02 status notification, NOT from an ATT response.
         """
         async with self._operation_lock:
             await self._async_ensure_connected()
 
-            # Re-enter control mode before every write, just like the CLI does
-            # in command_send / command_fan / command_session.
+            # Re-enter control mode before every write, just like the CLI.
             await self._async_enter_control_mode_unlocked()
 
-            try:
-                await self._async_send_frame_unlocked(*frame, expect_status=False)
-            except HomeAssistantError:
-                # GATT write failed — attempt auto-handshake and retry once.
+            # Send the actual command (fire-and-forget).
+            await self._async_write_frame_unlocked(*frame)
+
+            # Verify via EF02 notification.
+            status = await self._async_wait_for_status(predicate, timeout=5.0)
+            if status is None or not predicate(status):
+                # Maybe the handshake hasn't been done — try once.
                 if not self._handshake_done:
                     _LOGGER.info(
-                        "AC500 %s: GATT write failed, attempting EF03 handshake before retry",
+                        "AC500 %s: command not confirmed, attempting EF03 handshake",
                         self.address,
                     )
                     try:
                         await self._async_run_handshake_unlocked(timeout=10.0)
                     except HomeAssistantError:
                         _LOGGER.warning(
-                            "AC500 %s: auto-handshake failed, forcing reconnect",
+                            "AC500 %s: auto-handshake failed",
                             self.address,
                         )
-                        self._trigger_reconnect()
                         raise
-                    # Retry the original command after successful handshake.
-                    try:
-                        await self._async_send_frame_unlocked(*frame, expect_status=False)
-                    except HomeAssistantError as retry_err:
-                        self._last_error = str(retry_err)
-                        self._trigger_reconnect()
-                        raise HomeAssistantError(
-                            f"Sending the AC500 command failed after handshake retry: {retry_err}"
-                        ) from retry_err
-                else:
-                    # Handshake was already done — this is a genuine connection problem.
-                    self._trigger_reconnect()
-                    raise
+                    # Re-enter control mode and retry the command.
+                    await self._async_enter_control_mode_unlocked()
+                    await self._async_write_frame_unlocked(*frame)
+                    status = await self._async_wait_for_status(predicate, timeout=5.0)
 
-            status = await self._async_wait_for_status(predicate, timeout=5.0)
-            if status is None or not predicate(status):
-                raise HomeAssistantError("The AC500 did not confirm the requested state change")
+                if status is None or not predicate(status):
+                    raise HomeAssistantError(
+                        "The AC500 did not confirm the requested state change"
+                    )
 
     def _trigger_reconnect(self) -> None:
         """Force an immediate reconnect cycle."""
         self._handshake_done = False
         self._wake_event.set()
-        # Mark the disconnect event so the session loop exits cleanly.
         if self._disconnect_event is not None:
             self._disconnect_event.set()
 
@@ -342,7 +336,6 @@ class AC500ConnectionManager:
 
             try:
                 await self._async_run_connected_session(ble_device)
-                # Clean session end — reset failure counter.
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
@@ -360,12 +353,17 @@ class AC500ConnectionManager:
                 self._clear_connected_state()
                 self._publish_state()
 
-            # Exponential backoff: start at _MIN_RECONNECT_DELAY, double up to
-            # _reconnect_seconds.  After the first failure, reconnect quickly.
+            # Exponential backoff to avoid exhausting proxy connection slots.
+            # _MIN_RECONNECT_DELAY * 2^failures, capping at _MAX_RECONNECT_DELAY.
             delay = min(
-                _MIN_RECONNECT_DELAY * (2 ** min(self._consecutive_failures - 1, 5)),
+                _MIN_RECONNECT_DELAY * (2 ** min(self._consecutive_failures, 5)),
                 _MAX_RECONNECT_DELAY,
-                self._reconnect_seconds,
+            )
+            _LOGGER.debug(
+                "AC500 %s: reconnect in %.0fs (failure #%d)",
+                self.address,
+                delay,
+                self._consecutive_failures,
             )
             await self._async_wait_for_wake(delay)
 
@@ -387,37 +385,46 @@ class AC500ConnectionManager:
         async with self._operation_lock:
             await self._async_enter_control_mode_unlocked()
 
-        # Keepalive loop: tolerate a few consecutive failures before killing
-        # the session.  This avoids bouncing on transient proxy slowness.
+        # Keepalive loop.  Tolerate multiple consecutive failures before
+        # dropping the session; a single proxy hiccup should not kill us.
         keepalive_misses = 0
         while not self._stop_event.is_set() and not disconnected_event.is_set():
             self._live_event.clear()
             try:
-                await asyncio.wait_for(self._live_event.wait(), timeout=self._keepalive_seconds)
+                await asyncio.wait_for(
+                    self._live_event.wait(),
+                    timeout=self._keepalive_seconds,
+                )
                 keepalive_misses = 0
                 continue
             except TimeoutError:
-                try:
-                    async with self._operation_lock:
-                        status = await self._async_request_status_unlocked()
-                    if status is not None:
-                        keepalive_misses = 0
-                        continue
-                except HomeAssistantError:
-                    pass
-                keepalive_misses += 1
-                _LOGGER.debug(
-                    "AC500 %s keepalive miss #%d/%d",
-                    self.address,
-                    keepalive_misses,
-                    _KEEPALIVE_FAIL_LIMIT,
-                )
-                if keepalive_misses >= _KEEPALIVE_FAIL_LIMIT:
-                    raise RuntimeError(
-                        f"No status after {_KEEPALIVE_FAIL_LIMIT} keepalive attempts"
-                    )
+                pass
             finally:
                 self._live_event.clear()
+
+            # No notification — try to re-enter control mode and request
+            # status.  Errors are swallowed and counted as misses.
+            try:
+                async with self._operation_lock:
+                    await self._async_enter_control_mode_unlocked()
+                    status = await self._async_request_status_unlocked()
+                if status is not None:
+                    keepalive_misses = 0
+                    continue
+            except HomeAssistantError as err:
+                _LOGGER.debug("AC500 %s keepalive write failed: %s", self.address, err)
+
+            keepalive_misses += 1
+            _LOGGER.debug(
+                "AC500 %s keepalive miss #%d/%d",
+                self.address,
+                keepalive_misses,
+                _KEEPALIVE_FAIL_LIMIT,
+            )
+            if keepalive_misses >= _KEEPALIVE_FAIL_LIMIT:
+                raise RuntimeError(
+                    f"No status after {_KEEPALIVE_FAIL_LIMIT} keepalive attempts"
+                )
 
     async def _async_wait_for_wake(self, timeout: float) -> None:
         """Wait for a wake event or timeout."""
@@ -485,8 +492,8 @@ class AC500ConnectionManager:
                 self.name,
                 ble_device_callback=self._async_get_current_ble_device,
                 disconnected_callback=_handle_disconnect,
-                max_attempts=3,
-                timeout=30.0,
+                max_attempts=2,
+                timeout=_CONNECT_TIMEOUT,
                 pair=False,
                 use_services_cache=False,
             )
@@ -510,18 +517,25 @@ class AC500ConnectionManager:
     async def _async_enter_control_mode_unlocked(self) -> AC500Status | None:
         """Enter the AC500 control session.
 
-        Must be called before sending control commands.  The CLI does this
-        before every write (command_send, command_fan, command_session).
+        Must be called before sending control commands.  This is resilient:
+        write errors are logged and swallowed; we only care about whether
+        the device responds with a status notification.
         """
-        await self._async_send_frame_unlocked(0xAF, 0x00, 0x01, expect_status=False)
-        await asyncio.sleep(0.1)
-        await self._async_send_frame_unlocked(0xAF, 0x00, 0x01, expect_status=False)
+        for _ in range(2):
+            try:
+                await self._async_write_frame_unlocked(0xAF, 0x00, 0x01)
+            except HomeAssistantError as err:
+                _LOGGER.debug("AC500 %s: control mode write failed: %s", self.address, err)
+            await asyncio.sleep(0.1)
 
         self._live_event.clear()
         try:
             await asyncio.wait_for(self._live_event.wait(), timeout=2.0)
         except TimeoutError:
-            return await self._async_request_status_unlocked()
+            try:
+                return await self._async_request_status_unlocked()
+            except HomeAssistantError:
+                return self._last_status
         finally:
             self._live_event.clear()
 
@@ -533,7 +547,7 @@ class AC500ConnectionManager:
     async def _async_request_status_unlocked(self) -> AC500Status | None:
         """Request one fresh live status frame."""
         self._live_event.clear()
-        await self._async_send_frame_unlocked(0xA2, 0x00, 0x03, expect_status=False)
+        await self._async_write_frame_unlocked(0xA2, 0x00, 0x03)
         try:
             await asyncio.wait_for(self._live_event.wait(), timeout=3.0)
         except TimeoutError:
@@ -576,42 +590,36 @@ class AC500ConnectionManager:
             try:
                 await asyncio.wait_for(self._live_event.wait(), timeout=min(1.0, remaining))
             except TimeoutError:
-                await self._async_request_status_unlocked()
+                try:
+                    await self._async_request_status_unlocked()
+                except HomeAssistantError:
+                    pass
             finally:
                 self._live_event.clear()
 
-    async def _async_send_frame_unlocked(
+    async def _async_write_frame_unlocked(
         self,
         opcode: int,
         arg1: int = 0x00,
         arg2: int = 0x00,
-        *,
-        expect_status: bool = True,
-    ) -> AC500Status | None:
-        """Send one protocol frame."""
+    ) -> None:
+        """Write one protocol frame (fire-and-forget, no ATT response expected).
+
+        Uses ``response=False`` to avoid ATT error responses that BLE proxies
+        (ESPHome, Shelly) generate for devices that have not been OS-bonded.
+        Command confirmation is done via EF02 notifications instead.
+        """
         client = self._client
         if client is None:
             raise HomeAssistantError("The AC500 is not connected")
 
         frame = build_frame(opcode, arg1, arg2)
-        self._live_event.clear()
         try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
+            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
         except Exception as err:
             self._last_error = str(err)
             self._publish_state()
             raise HomeAssistantError(f"GATT write failed: {err}") from err
-
-        if not expect_status:
-            return self._last_status
-
-        try:
-            await asyncio.wait_for(self._live_event.wait(), timeout=3.0)
-        except TimeoutError:
-            return self._last_status
-        finally:
-            self._live_event.clear()
-        return self._last_status
 
     def _prime_from_last_service_info(self) -> None:
         """Prime RSSI and name from the latest discovery cache."""
