@@ -53,6 +53,9 @@ _LOGGER = logging.getLogger(__name__)
 _MIN_RECONNECT_DELAY = 2.0
 _MAX_RECONNECT_DELAY = 60.0
 
+# How many consecutive keepalive failures before we drop the session.
+_KEEPALIVE_FAIL_LIMIT = 3
+
 
 @dataclass(slots=True, frozen=True)
 class AC500RuntimeState:
@@ -217,6 +220,10 @@ class AC500ConnectionManager:
         async with self._operation_lock:
             await self._async_ensure_connected()
 
+            # Re-enter control mode before sending the command, just like the
+            # CLI does in command_fan.
+            await self._async_enter_control_mode_unlocked()
+
             if self._last_status is not None and self._last_status.auto_enabled:
                 await self._async_send_frame_unlocked(
                     *PROTOCOL_AUTO_COMMANDS["off"],
@@ -262,9 +269,18 @@ class AC500ConnectionManager:
         self._handshake_done = True
 
     async def _async_execute_command(self, frame: tuple[int, int, int], predicate) -> None:
-        """Send a command and wait until the status reflects it."""
+        """Send a command and wait until the status reflects it.
+
+        Mirrors the CLI pattern: re-enter control mode (AF 00 01) before each
+        command to ensure the device is ready to accept writes.
+        """
         async with self._operation_lock:
             await self._async_ensure_connected()
+
+            # Re-enter control mode before every write, just like the CLI does
+            # in command_send / command_fan / command_session.
+            await self._async_enter_control_mode_unlocked()
+
             try:
                 await self._async_send_frame_unlocked(*frame, expect_status=False)
             except HomeAssistantError:
@@ -371,16 +387,35 @@ class AC500ConnectionManager:
         async with self._operation_lock:
             await self._async_enter_control_mode_unlocked()
 
+        # Keepalive loop: tolerate a few consecutive failures before killing
+        # the session.  This avoids bouncing on transient proxy slowness.
+        keepalive_misses = 0
         while not self._stop_event.is_set() and not disconnected_event.is_set():
             self._live_event.clear()
             try:
                 await asyncio.wait_for(self._live_event.wait(), timeout=self._keepalive_seconds)
+                keepalive_misses = 0
                 continue
             except TimeoutError:
-                async with self._operation_lock:
-                    status = await self._async_request_status_unlocked()
-                if status is None:
-                    raise RuntimeError("No status updates received from the AC500")
+                try:
+                    async with self._operation_lock:
+                        status = await self._async_request_status_unlocked()
+                    if status is not None:
+                        keepalive_misses = 0
+                        continue
+                except HomeAssistantError:
+                    pass
+                keepalive_misses += 1
+                _LOGGER.debug(
+                    "AC500 %s keepalive miss #%d/%d",
+                    self.address,
+                    keepalive_misses,
+                    _KEEPALIVE_FAIL_LIMIT,
+                )
+                if keepalive_misses >= _KEEPALIVE_FAIL_LIMIT:
+                    raise RuntimeError(
+                        f"No status after {_KEEPALIVE_FAIL_LIMIT} keepalive attempts"
+                    )
             finally:
                 self._live_event.clear()
 
@@ -452,7 +487,8 @@ class AC500ConnectionManager:
                 disconnected_callback=_handle_disconnect,
                 max_attempts=3,
                 timeout=30.0,
-                use_services_cache=True,
+                pair=False,
+                use_services_cache=False,
             )
             return client
         except Exception as err:
@@ -472,7 +508,11 @@ class AC500ConnectionManager:
         raise HomeAssistantError("Service discovery has not been performed yet")
 
     async def _async_enter_control_mode_unlocked(self) -> AC500Status | None:
-        """Enter the AC500 control session."""
+        """Enter the AC500 control session.
+
+        Must be called before sending control commands.  The CLI does this
+        before every write (command_send, command_fan, command_session).
+        """
         await self._async_send_frame_unlocked(0xAF, 0x00, 0x01, expect_status=False)
         await asyncio.sleep(0.1)
         await self._async_send_frame_unlocked(0xAF, 0x00, 0x01, expect_status=False)
@@ -480,11 +520,15 @@ class AC500ConnectionManager:
         self._live_event.clear()
         try:
             await asyncio.wait_for(self._live_event.wait(), timeout=2.0)
-            return self._last_status
         except TimeoutError:
             return await self._async_request_status_unlocked()
         finally:
             self._live_event.clear()
+
+        # Small settle delay after receiving the status frame, matching the
+        # CLI's enter_control_mode behaviour.
+        await asyncio.sleep(0.2)
+        return self._last_status
 
     async def _async_request_status_unlocked(self) -> AC500Status | None:
         """Request one fresh live status frame."""
@@ -552,7 +596,7 @@ class AC500ConnectionManager:
         frame = build_frame(opcode, arg1, arg2)
         self._live_event.clear()
         try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
+            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
         except Exception as err:
             self._last_error = str(err)
             self._publish_state()

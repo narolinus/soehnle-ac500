@@ -117,7 +117,8 @@ class AC500SetupClient:
                 ble_device_callback=self._resolve_ble_device,
                 max_attempts=3,
                 timeout=30.0,
-                use_services_cache=True,
+                pair=False,
+                use_services_cache=False,
             )
             await self._async_resolve_services(client)
             return client
@@ -182,11 +183,13 @@ class AC500SetupClient:
         self.live_event.clear()
         try:
             await asyncio.wait_for(self.live_event.wait(), timeout=2.0)
-            return self.last_status
         except TimeoutError:
             return await self.async_request_status()
         finally:
             self.live_event.clear()
+
+        await asyncio.sleep(0.2)
+        return self.last_status
 
     async def async_request_status(self) -> AC500Status | None:
         """Request the current status frame."""
@@ -234,7 +237,7 @@ class AC500SetupClient:
         frame = build_frame(opcode, arg1, arg2)
         self.live_event.clear()
         try:
-            await self.client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
+            await self.client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
         except Exception as err:
             raise HomeAssistantError(f"Sending the BLE command failed: {err}") from err
 
