@@ -31,6 +31,7 @@ class AC500SensorDescription:
     state_class: SensorStateClass | None = None
     entity_category: EntityCategory | None = None
     entity_registry_enabled_default: bool = True
+    entity_registry_visible_default: bool = True
     suggested_display_precision: int | None = None
 
 

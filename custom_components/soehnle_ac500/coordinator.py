@@ -252,7 +252,12 @@ class AC500ConnectionManager:
         """Send a command and wait until the status reflects it."""
         async with self._operation_lock:
             await self._async_ensure_connected()
-            await self._async_send_frame_unlocked(*frame, expect_status=False)
+            try:
+                await self._async_send_frame_unlocked(*frame, expect_status=False)
+            except Exception as err:
+                self._last_error = str(err)
+                self._publish_state()
+                raise HomeAssistantError(f"Sending the AC500 command failed: {err}") from err
             status = await self._async_wait_for_status(predicate, timeout=5.0)
             if status is None or not predicate(status):
                 raise HomeAssistantError("The AC500 did not confirm the requested state change")
@@ -471,7 +476,10 @@ class AC500ConnectionManager:
 
         frame = build_frame(opcode, arg1, arg2)
         self._live_event.clear()
-        await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
+        try:
+            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
+        except Exception as err:
+            raise HomeAssistantError(f"GATT write failed: {err}") from err
 
         if not expect_status:
             return self._last_status

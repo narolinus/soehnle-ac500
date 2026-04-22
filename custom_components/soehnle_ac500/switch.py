@@ -27,6 +27,7 @@ class AC500SwitchDescription:
     setter_name: str
     device_class: str | None = None
     entity_registry_enabled_default: bool = True
+    entity_registry_visible_default: bool = True
     entity_category: EntityCategory | None = None
 
 
