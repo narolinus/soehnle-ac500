@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Any
 
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+from bleak_retry_connector import establish_connection
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
@@ -23,9 +25,6 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-# Short timeout for config-flow connections — must not block proxy slots.
-_SETUP_CONNECT_TIMEOUT = 15.0
 
 
 class AC500SetupClient:
@@ -43,7 +42,7 @@ class AC500SetupClient:
         self.address = address
         self.name = name
         self.ble_device = ble_device
-        self.client: BleakClientWithServiceCache | None = None
+        self.client: BleakClient | None = None
         self.live_event = asyncio.Event()
         self.ack_event = asyncio.Event()
         self.last_status: AC500Status | None = None
@@ -58,18 +57,29 @@ class AC500SetupClient:
         ) or self.ble_device
 
     async def __aenter__(self) -> "AC500SetupClient":
-        """Connect and start notifications."""
+        """Connect and start notifications.
+
+        Mirrors the CLI flow: connect → immediately start_notify.
+        """
         ble_device = self._resolve_ble_device()
         if ble_device is None:
             raise HomeAssistantError(
                 "The AC500 is currently not visible via a connectable Bluetooth adapter or proxy."
             )
 
-        self.client = await self._async_connect_via_ha_bluetooth(ble_device)
+        self.client = await self._async_connect(ble_device)
+
+        # Immediately subscribe to notifications — same order as the CLI.
         try:
             await self.client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
             await self.client.start_notify(ACK_CHAR_UUID, self._handle_ack)
         except Exception as err:
+            _LOGGER.warning(
+                "AC500 %s: start_notify failed: %s (type: %s)",
+                self.address,
+                err,
+                type(err).__name__,
+            )
             raise HomeAssistantError(f"Starting AC500 notifications failed: {err}") from err
         return self
 
@@ -110,72 +120,76 @@ class AC500SetupClient:
             )
             return self.last_status
 
-    async def _async_connect_via_ha_bluetooth(self, ble_device: BLEDevice) -> BleakClientWithServiceCache:
-        """Connect using Home Assistant's Bluetooth stack."""
+    async def _async_connect(self, ble_device: BLEDevice) -> BleakClient:
+        """Connect using Home Assistant's Bluetooth stack.
+
+        Uses plain BleakClient (not BleakClientWithServiceCache) to match
+        the CLI's connection behaviour as closely as possible.
+        """
+        _LOGGER.debug(
+            "AC500 %s: connecting via establish_connection "
+            "(BLEDevice: name=%s, address=%s, details=%s)",
+            self.address,
+            getattr(ble_device, "name", "?"),
+            getattr(ble_device, "address", "?"),
+            getattr(ble_device, "details", "?"),
+        )
+        t0 = time.monotonic()
+
         try:
             client = await establish_connection(
-                BleakClientWithServiceCache,
+                BleakClient,
                 ble_device,
                 self.name,
                 ble_device_callback=self._resolve_ble_device,
-                max_attempts=2,
-                timeout=_SETUP_CONNECT_TIMEOUT,
-                pair=False,
-                use_services_cache=False,
+                max_attempts=3,
+                timeout=30.0,
             )
-            await self._async_resolve_services(client)
+            elapsed = time.monotonic() - t0
+            _LOGGER.debug(
+                "AC500 %s: connected in %.1fs, services: %s",
+                self.address,
+                elapsed,
+                getattr(client, "services", None) is not None,
+            )
             return client
         except Exception as err:
+            elapsed = time.monotonic() - t0
             _LOGGER.warning(
-                "HA bluetooth connect for %s failed during setup: %s",
+                "AC500 %s: establish_connection failed after %.1fs: "
+                "%s: %s",
                 self.address,
+                elapsed,
+                type(err).__name__,
                 err,
             )
-            raise HomeAssistantError(f"Connecting to the AC500 via Home Assistant Bluetooth failed: {err}") from err
+            raise HomeAssistantError(
+                f"Connecting to the AC500 via Home Assistant Bluetooth failed: {err}"
+            ) from err
 
-    async def _async_resolve_services(self, client: Any) -> None:
-        """Ensure GATT services are resolved before using the client."""
-        get_services = getattr(client, "get_services", None)
-        if callable(get_services):
-            await get_services()
-            return
+    async def async_run_pairing_handshake(self, timeout: float = 20.0) -> None:
+        """Run the AC500 pairing handshake over EF03.
 
-        services = getattr(client, "services", None)
-        if services is not None:
-            return
-
-        raise HomeAssistantError("Service discovery has not been performed yet")
-
-    async def async_run_pairing_handshake(self, timeout: float = 25.0) -> None:
-        """Run the AC500 pairing handshake over EF03."""
+        The CLI confirms that this works WITHOUT pressing the Bluetooth
+        button — the device responds automatically to the A2 00 03 probe.
+        """
         expected_ack = build_frame(0xA2, 0x00, 0x02)
         self.last_ack = None
         self.ack_event.clear()
 
-        deadline = asyncio.get_running_loop().time() + timeout
-        ack = None
-
-        while asyncio.get_running_loop().time() < deadline:
-            remaining = deadline - asyncio.get_running_loop().time()
-            probe_timeout = min(2.5, remaining)
-
-            _LOGGER.debug("Sending AC500 pairing probe to %s", self.address)
-            await self.async_write_frame(0xA2, 0x00, 0x03)
-            ack = await self.async_wait_for_ack(expected_ack, timeout=probe_timeout)
-            if ack == expected_ack:
-                break
-
-            await asyncio.sleep(0.25)
-
+        _LOGGER.debug("AC500 %s: sending pairing handshake", self.address)
+        await self.async_write_frame(0xA2, 0x00, 0x03)
+        ack = await self.async_wait_for_ack(expected_ack, timeout=timeout)
         if ack != expected_ack:
             raise HomeAssistantError(
-                "No AC500 pairing acknowledgement received. Press the Bluetooth button on the purifier and try again."
+                "No AC500 pairing acknowledgement received. "
+                "Ensure the purifier is powered on and in range."
             )
 
-        _LOGGER.debug("Received AC500 pairing acknowledgement from %s", self.address)
+        _LOGGER.debug("AC500 %s: pairing ack received", self.address)
         await asyncio.sleep(0.1)
         await self.async_write_frame(0xA2, 0x00, 0x01)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
     async def async_enter_control_mode(self) -> AC500Status | None:
         """Open the control session."""

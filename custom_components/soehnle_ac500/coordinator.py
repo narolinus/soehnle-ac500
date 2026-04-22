@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+from bleak_retry_connector import establish_connection
 
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothChange, BluetoothScanningMode
@@ -56,8 +57,9 @@ _MAX_RECONNECT_DELAY = 120.0
 # How many consecutive keepalive failures before we drop the session.
 _KEEPALIVE_FAIL_LIMIT = 3
 
-# BLE connection timeout — keep short to avoid blocking proxy slots.
-_CONNECT_TIMEOUT = 15.0
+# BLE connection timeout — must be long enough for HA's Bluetooth stack
+# to complete connect + GATT service discovery.
+_CONNECT_TIMEOUT = 30.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -95,7 +97,7 @@ class AC500ConnectionManager:
         self._reconnect_seconds = reconnect_seconds
         self._keepalive_seconds = keepalive_seconds
 
-        self._client: BleakClientWithServiceCache | None = None
+        self._client: BleakClient | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
@@ -374,8 +376,16 @@ class AC500ConnectionManager:
 
         self._client = await self._async_connect_via_ha_bluetooth(ble_device, disconnected_event)
         self._last_error = None
-        await self._async_resolve_services(self._client)
 
+        # Immediately subscribe to notifications — same approach as the CLI.
+        # No redundant get_services() call: establish_connection already
+        # resolves GATT services during connect().  The device drops idle
+        # connections after ~10 s, so every millisecond counts.
+        _LOGGER.debug(
+            "AC500 %s: connected, services resolved: %s",
+            self.address,
+            getattr(self._client, "services", None) is not None,
+        )
         await self._client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
         await self._client.start_notify(ACK_CHAR_UUID, self._handle_ack)
 
@@ -480,39 +490,55 @@ class AC500ConnectionManager:
         self,
         ble_device: BLEDevice,
         disconnected_event: asyncio.Event,
-    ) -> BleakClientWithServiceCache:
-        """Connect using Home Assistant's Bluetooth stack."""
+    ) -> BleakClient:
+        """Connect using Home Assistant's Bluetooth stack.
+
+        Uses plain BleakClient (not BleakClientWithServiceCache) to match
+        the CLI's connection behaviour as closely as possible.
+        """
+        import time as _time
+
         def _handle_disconnect(_: Any) -> None:
             self.hass.loop.call_soon_threadsafe(disconnected_event.set)
 
+        _LOGGER.debug(
+            "AC500 %s: connecting (BLEDevice: %s, details=%s)",
+            self.address,
+            getattr(ble_device, "address", "?"),
+            getattr(ble_device, "details", "?"),
+        )
+        t0 = _time.monotonic()
+
         try:
             client = await establish_connection(
-                BleakClientWithServiceCache,
+                BleakClient,
                 ble_device,
                 self.name,
                 ble_device_callback=self._async_get_current_ble_device,
                 disconnected_callback=_handle_disconnect,
-                max_attempts=2,
+                max_attempts=3,
                 timeout=_CONNECT_TIMEOUT,
-                pair=False,
-                use_services_cache=False,
+            )
+            elapsed = _time.monotonic() - t0
+            _LOGGER.debug(
+                "AC500 %s: connected in %.1fs",
+                self.address,
+                elapsed,
             )
             return client
         except Exception as err:
-            _LOGGER.warning("AC500 %s connect via HA bluetooth failed: %s", self.address, err)
-            raise HomeAssistantError(f"Connecting to the AC500 via Home Assistant Bluetooth failed: {err}") from err
+            elapsed = _time.monotonic() - t0
+            _LOGGER.warning(
+                "AC500 %s connect failed after %.1fs: %s: %s",
+                self.address,
+                elapsed,
+                type(err).__name__,
+                err,
+            )
+            raise HomeAssistantError(
+                f"Connecting to the AC500 via Home Assistant Bluetooth failed: {err}"
+            ) from err
 
-    async def _async_resolve_services(self, client: Any) -> None:
-        """Ensure GATT services are resolved before enabling notifications."""
-        get_services = getattr(client, "get_services", None)
-        if callable(get_services):
-            await get_services()
-            return
-
-        if getattr(client, "services", None) is not None:
-            return
-
-        raise HomeAssistantError("Service discovery has not been performed yet")
 
     async def _async_enter_control_mode_unlocked(self) -> AC500Status | None:
         """Enter the AC500 control session.

@@ -15,7 +15,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .ble import async_pair_ac500, async_verify_ac500
+from .ble import async_pair_ac500
 from .const import DEFAULT_NAME, DOMAIN
 from .coordinator import is_ac500_service_info
 
@@ -244,40 +244,15 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_pair(self, user_input: dict[str, Any] | None = None):
-        """Set up the AC500 — try simple verification first, fall back to full pairing."""
+        """Set up the AC500 — connect and run the pairing handshake."""
         assert self._address is not None
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # First, try a simple connect-and-verify (no pairing handshake).
-            # This succeeds when the device was already paired or doesn't need
-            # a handshake for read-only operations.
-            try:
-                status = await async_verify_ac500(
-                    self.hass,
-                    self._address,
-                    self._discovered_name,
-                    ble_device=self._ble_device,
-                )
-                if status is not None:
-                    _LOGGER.info(
-                        "AC500 %s: verified without pairing handshake",
-                        self._address,
-                    )
-                    return self.async_create_entry(
-                        title=self._discovered_name,
-                        data={
-                            CONF_ADDRESS: self._address,
-                            CONF_NAME: self._discovered_name,
-                        },
-                    )
-            except HomeAssistantError:
-                _LOGGER.debug(
-                    "AC500 %s: simple verification failed, trying full pairing",
-                    self._address,
-                )
-
-            # Fall back to the full EF03 pairing handshake.
+            # Single connection attempt: connect, pair, and verify in one go.
+            # We do NOT do a separate verify-before-pair step because each
+            # connection attempt takes up to 30 s × 3 retries through the HA
+            # Bluetooth stack.
             try:
                 await async_pair_ac500(
                     self.hass,
@@ -293,13 +268,13 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "pairing_failed"
                 elif "authentication failed" in message or "authentication canceled" in message:
                     errors["base"] = "authentication_failed"
-                elif "service discovery has not been performed yet" in message:
+                elif "notification" in message or "service discovery" in message:
                     errors["base"] = "service_discovery_failed"
-                elif "starting ac500 notifications failed" in message:
-                    errors["base"] = "service_discovery_failed"
+                elif "timeout" in message or "failed to connect" in message:
+                    errors["base"] = "cannot_connect"
                 else:
                     errors["base"] = "cannot_connect"
-                    _LOGGER.warning("AC500 pairing for %s failed: %s", self._address, err)
+                _LOGGER.warning("AC500 pairing for %s failed: %s", self._address, err)
             except Exception:  # pragma: no cover - defensive UX fallback
                 _LOGGER.exception("Unexpected AC500 setup error for %s", self._address)
                 errors["base"] = "cannot_connect"
