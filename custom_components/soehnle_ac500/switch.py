@@ -25,6 +25,7 @@ class AC500SwitchDescription:
     icon: str
     value_fn: Callable
     setter_name: str
+    device_class: str | None = None
     entity_category: EntityCategory | None = None
 
 

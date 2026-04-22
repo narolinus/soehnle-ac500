@@ -85,7 +85,7 @@ class AC500ConnectionManager:
         self._reconnect_seconds = reconnect_seconds
         self._keepalive_seconds = keepalive_seconds
 
-        self._client: BleakClientWithServiceCache | None = None
+        self._client: Any = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
@@ -295,11 +295,15 @@ class AC500ConnectionManager:
             BleakClientWithServiceCache,
             ble_device,
             self.name,
+            ble_device_callback=self._async_get_current_ble_device,
             disconnected_callback=_handle_disconnect,
             max_attempts=3,
-            timeout=20.0,
+            timeout=30.0,
+            pair=False,
+            use_services_cache=False,
         )
         self._last_error = None
+        await self._async_resolve_services(self._client)
 
         await self._client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
         await self._client.start_notify(ACK_CHAR_UUID, self._handle_ack)
@@ -363,6 +367,26 @@ class AC500ConnectionManager:
 
         if self._client is None:
             raise HomeAssistantError("The AC500 connection is not ready")
+
+    def _async_get_current_ble_device(self) -> BLEDevice | None:
+        """Return the freshest known BLE device object."""
+        return bluetooth.async_ble_device_from_address(
+            self.hass,
+            self.address,
+            connectable=True,
+        )
+
+    async def _async_resolve_services(self, client: Any) -> None:
+        """Ensure GATT services are resolved before enabling notifications."""
+        get_services = getattr(client, "get_services", None)
+        if callable(get_services):
+            await get_services()
+            return
+
+        if getattr(client, "services", None) is not None:
+            return
+
+        raise HomeAssistantError("Service discovery has not been performed yet")
 
     async def _async_enter_control_mode_unlocked(self) -> AC500Status | None:
         """Enter the AC500 control session."""
