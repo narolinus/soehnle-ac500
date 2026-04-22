@@ -118,14 +118,16 @@ def validate_frame(frame: bytes) -> None:
 
 @dataclass(slots=True)
 class AC500Status:
+    frame_variant: int
     fan_raw: int
     fan_label: str
     timer_raw: int
     timer_label: str
     flags_raw: int
     reserved_raw: int
-    pm_raw: int
-    pm25_ug_m3: float
+    pm_raw: int | None
+    pm25_ug_m3: float | None
+    pm_known: bool
     temperature_raw: int
     temperature_c: float
     temperature_aux_raw: int
@@ -143,20 +145,35 @@ class AC500Status:
     @classmethod
     def from_frame(cls, frame: bytes) -> "AC500Status":
         validate_frame(frame)
-        if frame[2] != 0xA0 or frame[3] != 0x21:
+        if frame[2] != 0xA0 or frame[3] not in (0x21, 0x22):
             raise ValueError(f"Unexpected live-data frame: {frame.hex()}")
 
-        fan_raw = frame[4]
-        timer_raw = frame[5]
-        flags_raw = frame[6]
-        reserved_raw = frame[7]
-        pm_raw = frame[8] | (frame[9] << 8)
+        if frame[3] == 0x21:
+            fan_raw = frame[4]
+            timer_raw = frame[5]
+            flags_raw = frame[6]
+            reserved_raw = frame[7]
+            pm_raw = frame[8] | (frame[9] << 8)
+            pm25_ug_m3 = pm_raw / 10.0
+            pm_known = True
+        else:
+            # Newer captures use A0 22 with PM2.5 moved to bytes 7-8 in
+            # big-endian order. Fan/timer/flags remain aligned with A0 21.
+            fan_raw = frame[4]
+            timer_raw = frame[5]
+            flags_raw = frame[6]
+            reserved_raw = frame[9]
+            pm_raw = (frame[7] << 8) | frame[8]
+            pm25_ug_m3 = pm_raw / 10.0
+            pm_known = True
+
         temperature_raw = frame[10]
         temperature_aux_raw = frame[11]
         filter_raw = frame[12] | (frame[13] << 8)
         filter_aux_raw = frame[14]
 
         return cls(
+            frame_variant=frame[3],
             fan_raw=fan_raw,
             fan_label=FAN_LABELS.get(fan_raw, f"unknown({fan_raw})"),
             timer_raw=timer_raw,
@@ -164,7 +181,8 @@ class AC500Status:
             flags_raw=flags_raw,
             reserved_raw=reserved_raw,
             pm_raw=pm_raw,
-            pm25_ug_m3=pm_raw / 10.0,
+            pm25_ug_m3=pm25_ug_m3,
+            pm_known=pm_known,
             temperature_raw=temperature_raw,
             temperature_c=temperature_raw / 10.0,
             temperature_aux_raw=temperature_aux_raw,
@@ -184,7 +202,7 @@ class AC500Status:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["notes"] = {
-            "pm25_ug_m3": "Observed as raw/10 from live status notifications.",
+            "pm25_ug_m3": "Observed as raw/10; A0 21 uses bytes 8-9 (little-endian), A0 22 uses bytes 7-8 (big-endian).",
             "temperature_c": "Observed as raw/10 from live status notifications.",
             "filter_raw": "Raw value maps to percent approximately as raw / 4320 * 100.",
         }
