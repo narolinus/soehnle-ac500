@@ -386,8 +386,8 @@ class AC500ConnectionManager:
             self.address,
             getattr(self._client, "services", None) is not None,
         )
-        await self._client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
-        await self._client.start_notify(ACK_CHAR_UUID, self._handle_ack)
+        await self._async_safe_start_notify(self._client, LIVE_DATA_CHAR_UUID, self._handle_live_data)
+        await self._async_safe_start_notify(self._client, ACK_CHAR_UUID, self._handle_ack)
 
         self._connected_event.set()
         self._publish_state()
@@ -447,13 +447,22 @@ class AC500ConnectionManager:
             self._wake_event.clear()
 
     async def _async_disconnect(self) -> None:
-        """Disconnect the current client."""
+        """Disconnect the current client.
+
+        Explicitly stop notifications before disconnecting so that BlueZ
+        releases the exclusive notification file descriptors.  Without this,
+        the next connection's start_notify will fail with 'Notify acquired'.
+        """
         client = self._client
         self._client = None
         if client is None:
             return
         with contextlib.suppress(Exception):
             if client.is_connected:
+                with contextlib.suppress(Exception):
+                    await client.stop_notify(LIVE_DATA_CHAR_UUID)
+                with contextlib.suppress(Exception):
+                    await client.stop_notify(ACK_CHAR_UUID)
                 await client.disconnect()
 
     def _clear_connected_state(self) -> None:
@@ -485,6 +494,34 @@ class AC500ConnectionManager:
             self.address,
             connectable=True,
         )
+
+    async def _async_safe_start_notify(self, client: BleakClient, uuid: str, callback) -> None:
+        """Subscribe to notifications, handling BlueZ 'Notify acquired' errors.
+
+        BlueZ keeps exclusive notification file descriptors.  If the previous
+        connection was not cleanly torn down (common after crashes, proxy
+        reconnects, or coordinator restarts), the FD is still held and
+        start_notify raises ``NotPermitted: Notify acquired``.
+
+        The standard workaround is to call stop_notify first to release the
+        stale FD, then start_notify again.
+        """
+        try:
+            await client.start_notify(uuid, callback)
+        except Exception as err:
+            if "Notify acquired" in str(err) or "NotPermitted" in str(err):
+                _LOGGER.debug(
+                    "AC500 %s: notification already acquired for %s, "
+                    "releasing and retrying",
+                    self.address,
+                    uuid,
+                )
+                with contextlib.suppress(Exception):
+                    await client.stop_notify(uuid)
+                await asyncio.sleep(0.1)
+                await client.start_notify(uuid, callback)
+            else:
+                raise
 
     async def _async_connect_via_ha_bluetooth(
         self,
