@@ -29,13 +29,15 @@
       }
     },
     "error": {
+      "authentication_failed": "Bluetooth pairing was rejected by BlueZ. Pair the AC500 with the Home Assistant host at the operating-system level first, then run setup again.",
       "cannot_connect": "Could not connect to the AC500.",
       "device_not_found": "The AC500 is currently not visible via a connectable Bluetooth adapter or proxy.",
       "invalid_mac": "Enter a valid Bluetooth MAC address in the form AA:BB:CC:DD:EE:FF.",
       "no_bluetooth_scanner": "Home Assistant currently has no connectable Bluetooth adapter or proxy available.",
       "no_devices_found": "No visible AC500 devices are currently available.",
       "pairing_backend_failed": "The Bluetooth backend could not complete pairing.",
-      "pairing_failed": "The AC500 pairing handshake did not complete. Put the purifier into pairing mode, press the Bluetooth button, and try again."
+      "pairing_failed": "The AC500 pairing handshake did not complete. Put the purifier into pairing mode, press the Bluetooth button, and try again.",
+      "service_discovery_failed": "Bluetooth connected, but GATT services or notifications could not be initialized. Try again after a few seconds."
     }
   }
 }

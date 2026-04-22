@@ -262,6 +262,12 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "device_not_found"
                 elif "pairing acknowledgement" in message:
                     errors["base"] = "pairing_failed"
+                elif "authentication failed" in message or "authentication canceled" in message:
+                    errors["base"] = "authentication_failed"
+                elif "service discovery has not been performed yet" in message:
+                    errors["base"] = "service_discovery_failed"
+                elif "starting ac500 notifications failed" in message:
+                    errors["base"] = "service_discovery_failed"
                 else:
                     errors["base"] = "cannot_connect"
                     _LOGGER.warning("AC500 pairing for %s failed: %s", self._address, err)

@@ -64,8 +64,11 @@ class AC500SetupClient:
             )
 
         self.client = await self._async_connect_with_fallbacks(ble_device)
-        await self.client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
-        await self.client.start_notify(ACK_CHAR_UUID, self._handle_ack)
+        try:
+            await self.client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
+            await self.client.start_notify(ACK_CHAR_UUID, self._handle_ack)
+        except Exception as err:
+            raise HomeAssistantError(f"Starting AC500 notifications failed: {err}") from err
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -94,7 +97,7 @@ class AC500SetupClient:
 
     async def _async_connect_with_fallbacks(self, ble_device: BLEDevice) -> Any:
         """Connect using the HA bluetooth stack, then fall back to direct Bleak."""
-        first_error: Exception | None = None
+        errors: list[str] = []
 
         try:
             client = await establish_connection(
@@ -104,31 +107,48 @@ class AC500SetupClient:
                 ble_device_callback=self._resolve_ble_device,
                 max_attempts=3,
                 timeout=30.0,
-                pair=True,
+                pair=False,
                 use_services_cache=False,
             )
-            get_services = getattr(client, "get_services", None)
-            if callable(get_services):
-                await get_services()
+            await self._async_resolve_services(client)
             return client
         except Exception as err:
-            first_error = err
+            errors.append(f"HA bluetooth (existing bond): {err}")
             _LOGGER.warning(
-                "HA bluetooth connect for %s failed during setup, retrying with direct BleakClient: %s",
+                "HA bluetooth connect for %s failed during setup (existing bond): %s",
                 self.address,
                 err,
             )
 
         try:
-            client = BleakClient(self.address, pair=True, timeout=30.0)
+            client = BleakClient(self.address, pair=False, timeout=30.0)
             await client.connect()
+            await self._async_resolve_services(client)
             return client
         except Exception as err:
-            if first_error is not None:
-                raise HomeAssistantError(
-                    f"Connecting to the AC500 failed via Home Assistant Bluetooth and direct BlueZ: {first_error} / {err}"
-                ) from err
-            raise
+            errors.append(f"direct BlueZ (existing bond): {err}")
+            _LOGGER.warning(
+                "Direct BlueZ connect for %s failed during setup (existing bond): %s",
+                self.address,
+                err,
+            )
+
+        raise HomeAssistantError(
+            "Connecting to the AC500 failed via all setup paths: " + " / ".join(errors)
+        )
+
+    async def _async_resolve_services(self, client: Any) -> None:
+        """Ensure GATT services are resolved before using the client."""
+        get_services = getattr(client, "get_services", None)
+        if callable(get_services):
+            await get_services()
+            return
+
+        services = getattr(client, "services", None)
+        if services is not None:
+            return
+
+        raise HomeAssistantError("Service discovery has not been performed yet")
 
     async def async_run_pairing_handshake(self, timeout: float = 25.0) -> None:
         """Run the AC500 pairing handshake over EF03."""
