@@ -26,6 +26,7 @@ class AC500SwitchDescription:
     value_fn: Callable
     setter_name: str
     device_class: str | None = None
+    entity_registry_enabled_default: bool = True
     entity_category: EntityCategory | None = None
 
 

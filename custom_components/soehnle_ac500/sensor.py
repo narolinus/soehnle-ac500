@@ -26,9 +26,11 @@ class AC500SensorDescription:
     value_fn: Callable
     icon: str | None = None
     native_unit_of_measurement: str | None = None
+    suggested_unit_of_measurement: str | None = None
     device_class: SensorDeviceClass | None = None
     state_class: SensorStateClass | None = None
     entity_category: EntityCategory | None = None
+    entity_registry_enabled_default: bool = True
     suggested_display_precision: int | None = None
 
 

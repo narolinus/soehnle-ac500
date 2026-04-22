@@ -128,7 +128,10 @@ class AC500ConnectionManager:
             {"address": self.address, "connectable": True},
             BluetoothScanningMode.ACTIVE,
         )
-        self._task = self.hass.async_create_task(self._async_connection_loop())
+        self._task = self.hass.async_create_background_task(
+            self._async_connection_loop(),
+            f"{DOMAIN}_connection_{self.address}",
+        )
         self._publish_state()
 
     async def async_stop(self) -> None:
