@@ -1,4 +1,4 @@
-"""Temporary BLE setup helpers for the Soehnle AC500."""
+"""BLE setup helpers for the Soehnle AC500."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import contextlib
 import logging
 from typing import Any
 
-from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
@@ -63,7 +62,7 @@ class AC500SetupClient:
                 "The AC500 is currently not visible via a connectable Bluetooth adapter or proxy."
             )
 
-        self.client = await self._async_connect_with_fallbacks(ble_device)
+        self.client = await self._async_connect_via_ha_bluetooth(ble_device)
         try:
             await self.client.start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
             await self.client.start_notify(ACK_CHAR_UUID, self._handle_ack)
@@ -82,7 +81,7 @@ class AC500SetupClient:
         self.client = None
 
     async def async_pair_and_initialize(self) -> AC500Status | None:
-        """Run pairing and return an initial status frame."""
+        """Run pairing handshake and return an initial status frame."""
         await self.async_run_pairing_handshake()
         try:
             await self.async_enter_control_mode()
@@ -95,10 +94,21 @@ class AC500SetupClient:
             )
             return self.last_status
 
-    async def _async_connect_with_fallbacks(self, ble_device: BLEDevice) -> Any:
-        """Connect using the HA bluetooth stack, then fall back to direct Bleak."""
-        errors: list[str] = []
+    async def async_connect_and_verify(self) -> AC500Status | None:
+        """Connect and verify we can read status — no pairing handshake."""
+        try:
+            await self.async_enter_control_mode()
+            return await self.async_request_status()
+        except HomeAssistantError as err:
+            _LOGGER.debug(
+                "AC500 %s: connect-and-verify failed: %s",
+                self.address,
+                err,
+            )
+            return self.last_status
 
+    async def _async_connect_via_ha_bluetooth(self, ble_device: BLEDevice) -> BleakClientWithServiceCache:
+        """Connect using Home Assistant's Bluetooth stack."""
         try:
             client = await establish_connection(
                 BleakClientWithServiceCache,
@@ -107,35 +117,17 @@ class AC500SetupClient:
                 ble_device_callback=self._resolve_ble_device,
                 max_attempts=3,
                 timeout=30.0,
-                pair=False,
-                use_services_cache=False,
+                use_services_cache=True,
             )
             await self._async_resolve_services(client)
             return client
         except Exception as err:
-            errors.append(f"HA bluetooth (existing bond): {err}")
             _LOGGER.warning(
-                "HA bluetooth connect for %s failed during setup (existing bond): %s",
+                "HA bluetooth connect for %s failed during setup: %s",
                 self.address,
                 err,
             )
-
-        try:
-            client = BleakClient(self.address, pair=False, timeout=30.0)
-            await client.connect()
-            await self._async_resolve_services(client)
-            return client
-        except Exception as err:
-            errors.append(f"direct BlueZ (existing bond): {err}")
-            _LOGGER.warning(
-                "Direct BlueZ connect for %s failed during setup (existing bond): %s",
-                self.address,
-                err,
-            )
-
-        raise HomeAssistantError(
-            "Connecting to the AC500 failed via all setup paths: " + " / ".join(errors)
-        )
+            raise HomeAssistantError(f"Connecting to the AC500 via Home Assistant Bluetooth failed: {err}") from err
 
     async def _async_resolve_services(self, client: Any) -> None:
         """Ensure GATT services are resolved before using the client."""
@@ -242,7 +234,7 @@ class AC500SetupClient:
         frame = build_frame(opcode, arg1, arg2)
         self.live_event.clear()
         try:
-            await self.client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
+            await self.client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
         except Exception as err:
             raise HomeAssistantError(f"Sending the BLE command failed: {err}") from err
 
@@ -280,3 +272,14 @@ async def async_pair_ac500(
     """Pair and initialize one AC500."""
     async with AC500SetupClient(hass, address, name, ble_device=ble_device) as client:
         return await client.async_pair_and_initialize()
+
+
+async def async_verify_ac500(
+    hass: HomeAssistant,
+    address: str,
+    name: str,
+    ble_device: BLEDevice | None = None,
+) -> AC500Status | None:
+    """Connect and verify an AC500 without pairing handshake."""
+    async with AC500SetupClient(hass, address, name, ble_device=ble_device) as client:
+        return await client.async_connect_and_verify()

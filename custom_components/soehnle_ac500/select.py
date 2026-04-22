@@ -25,7 +25,7 @@ async def async_setup_entry(
 class AC500TimerSelect(AC500Entity, SelectEntity):
     """Expose the timer as a select entity."""
 
-    _attr_name = "Timer"
+    _attr_translation_key = "timer"
     _attr_icon = "mdi:timer-outline"
     _attr_options = TIMER_OPTIONS
 

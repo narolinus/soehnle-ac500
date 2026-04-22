@@ -49,6 +49,10 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Minimum reconnect delay to avoid tight retry loops.
+_MIN_RECONNECT_DELAY = 2.0
+_MAX_RECONNECT_DELAY = 60.0
+
 
 @dataclass(slots=True, frozen=True)
 class AC500RuntimeState:
@@ -85,7 +89,7 @@ class AC500ConnectionManager:
         self._reconnect_seconds = reconnect_seconds
         self._keepalive_seconds = keepalive_seconds
 
-        self._client: Any = None
+        self._client: BleakClientWithServiceCache | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
@@ -101,6 +105,8 @@ class AC500ConnectionManager:
         self._rssi: int | None = None
         self._last_seen: datetime | None = None
         self._last_error: str | None = None
+        self._consecutive_failures: int = 0
+        self._handshake_done: bool = False
 
     @property
     def state(self) -> AC500RuntimeState:
@@ -233,20 +239,27 @@ class AC500ConnectionManager:
         """Run the AC500 onboarding handshake on the active connection."""
         async with self._operation_lock:
             await self._async_ensure_connected()
-            expected_ack = build_frame(0xA2, 0x00, 0x02)
-            self._last_ack = None
-            self._ack_event.clear()
+            await self._async_run_handshake_unlocked()
 
-            await self._async_send_frame_unlocked(0xA2, 0x00, 0x03, expect_status=False)
-            ack = await self._async_wait_for_ack(expected_ack, timeout=20.0)
-            if ack != expected_ack:
-                raise HomeAssistantError(
-                    "No AC500 pairing acknowledgement received. Press the Bluetooth button on the purifier and try again."
-                )
+    async def _async_run_handshake_unlocked(self, timeout: float = 20.0) -> None:
+        """Execute the EF03 pairing handshake (must hold _operation_lock)."""
+        expected_ack = build_frame(0xA2, 0x00, 0x02)
+        self._last_ack = None
+        self._ack_event.clear()
 
-            await asyncio.sleep(0.1)
-            await self._async_send_frame_unlocked(0xA2, 0x00, 0x01, expect_status=False)
-            await asyncio.sleep(0.3)
+        _LOGGER.debug("Starting AC500 EF03 handshake for %s", self.address)
+        await self._async_send_frame_unlocked(0xA2, 0x00, 0x03, expect_status=False)
+        ack = await self._async_wait_for_ack(expected_ack, timeout=timeout)
+        if ack != expected_ack:
+            raise HomeAssistantError(
+                "No AC500 pairing acknowledgement received. Press the Bluetooth button on the purifier and try again."
+            )
+
+        _LOGGER.debug("Received AC500 pairing ack from %s", self.address)
+        await asyncio.sleep(0.1)
+        await self._async_send_frame_unlocked(0xA2, 0x00, 0x01, expect_status=False)
+        await asyncio.sleep(0.3)
+        self._handshake_done = True
 
     async def _async_execute_command(self, frame: tuple[int, int, int], predicate) -> None:
         """Send a command and wait until the status reflects it."""
@@ -254,13 +267,47 @@ class AC500ConnectionManager:
             await self._async_ensure_connected()
             try:
                 await self._async_send_frame_unlocked(*frame, expect_status=False)
-            except Exception as err:
-                self._last_error = str(err)
-                self._publish_state()
-                raise HomeAssistantError(f"Sending the AC500 command failed: {err}") from err
+            except HomeAssistantError:
+                # GATT write failed — attempt auto-handshake and retry once.
+                if not self._handshake_done:
+                    _LOGGER.info(
+                        "AC500 %s: GATT write failed, attempting EF03 handshake before retry",
+                        self.address,
+                    )
+                    try:
+                        await self._async_run_handshake_unlocked(timeout=10.0)
+                    except HomeAssistantError:
+                        _LOGGER.warning(
+                            "AC500 %s: auto-handshake failed, forcing reconnect",
+                            self.address,
+                        )
+                        self._trigger_reconnect()
+                        raise
+                    # Retry the original command after successful handshake.
+                    try:
+                        await self._async_send_frame_unlocked(*frame, expect_status=False)
+                    except HomeAssistantError as retry_err:
+                        self._last_error = str(retry_err)
+                        self._trigger_reconnect()
+                        raise HomeAssistantError(
+                            f"Sending the AC500 command failed after handshake retry: {retry_err}"
+                        ) from retry_err
+                else:
+                    # Handshake was already done — this is a genuine connection problem.
+                    self._trigger_reconnect()
+                    raise
+
             status = await self._async_wait_for_status(predicate, timeout=5.0)
             if status is None or not predicate(status):
                 raise HomeAssistantError("The AC500 did not confirm the requested state change")
+
+    def _trigger_reconnect(self) -> None:
+        """Force an immediate reconnect cycle."""
+        self._handshake_done = False
+        self._wake_event.set()
+        # Mark the disconnect event so the session loop exits cleanly.
+        if self._disconnect_event is not None:
+            self._disconnect_event.set()
 
     async def _async_connection_loop(self) -> None:
         """Maintain a live connection when the device is present."""
@@ -279,37 +326,39 @@ class AC500ConnectionManager:
 
             try:
                 await self._async_run_connected_session(ble_device)
+                # Clean session end — reset failure counter.
+                self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as err:
                 self._last_error = str(err)
-                _LOGGER.debug("AC500 session for %s ended: %s", self.address, err)
+                self._consecutive_failures += 1
+                _LOGGER.debug(
+                    "AC500 session for %s ended (failure #%d): %s",
+                    self.address,
+                    self._consecutive_failures,
+                    err,
+                )
             finally:
                 await self._async_disconnect()
                 self._clear_connected_state()
                 self._publish_state()
 
-            await self._async_wait_for_wake(self._reconnect_seconds)
+            # Exponential backoff: start at _MIN_RECONNECT_DELAY, double up to
+            # _reconnect_seconds.  After the first failure, reconnect quickly.
+            delay = min(
+                _MIN_RECONNECT_DELAY * (2 ** min(self._consecutive_failures - 1, 5)),
+                _MAX_RECONNECT_DELAY,
+                self._reconnect_seconds,
+            )
+            await self._async_wait_for_wake(delay)
 
     async def _async_run_connected_session(self, ble_device: BLEDevice) -> None:
         """Open and hold a connection until it drops."""
         disconnected_event = asyncio.Event()
         self._disconnect_event = disconnected_event
 
-        def _handle_disconnect(_: Any) -> None:
-            self.hass.loop.call_soon_threadsafe(disconnected_event.set)
-
-        self._client = await establish_connection(
-            BleakClientWithServiceCache,
-            ble_device,
-            self.name,
-            ble_device_callback=self._async_get_current_ble_device,
-            disconnected_callback=_handle_disconnect,
-            max_attempts=3,
-            timeout=30.0,
-            pair=False,
-            use_services_cache=False,
-        )
+        self._client = await self._async_connect_via_ha_bluetooth(ble_device, disconnected_event)
         self._last_error = None
         await self._async_resolve_services(self._client)
 
@@ -361,6 +410,7 @@ class AC500ConnectionManager:
         self._disconnect_event = None
         self._ack_event.clear()
         self._live_event.clear()
+        self._handshake_done = False
 
     async def _async_ensure_connected(self) -> None:
         """Ensure an active connection exists."""
@@ -383,6 +433,31 @@ class AC500ConnectionManager:
             self.address,
             connectable=True,
         )
+
+    async def _async_connect_via_ha_bluetooth(
+        self,
+        ble_device: BLEDevice,
+        disconnected_event: asyncio.Event,
+    ) -> BleakClientWithServiceCache:
+        """Connect using Home Assistant's Bluetooth stack."""
+        def _handle_disconnect(_: Any) -> None:
+            self.hass.loop.call_soon_threadsafe(disconnected_event.set)
+
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                ble_device,
+                self.name,
+                ble_device_callback=self._async_get_current_ble_device,
+                disconnected_callback=_handle_disconnect,
+                max_attempts=3,
+                timeout=30.0,
+                use_services_cache=True,
+            )
+            return client
+        except Exception as err:
+            _LOGGER.warning("AC500 %s connect via HA bluetooth failed: %s", self.address, err)
+            raise HomeAssistantError(f"Connecting to the AC500 via Home Assistant Bluetooth failed: {err}") from err
 
     async def _async_resolve_services(self, client: Any) -> None:
         """Ensure GATT services are resolved before enabling notifications."""
@@ -477,8 +552,10 @@ class AC500ConnectionManager:
         frame = build_frame(opcode, arg1, arg2)
         self._live_event.clear()
         try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
+            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
         except Exception as err:
+            self._last_error = str(err)
+            self._publish_state()
             raise HomeAssistantError(f"GATT write failed: {err}") from err
 
         if not expect_status:

@@ -29,7 +29,7 @@ async def async_setup_entry(
 class AC500FanEntity(AC500Entity, FanEntity):
     """Expose the purifier as a fan."""
 
-    _attr_name = None
+    _attr_translation_key = "fan"
     _attr_supported_features = (
         FanEntityFeature.SET_SPEED | FanEntityFeature.TURN_OFF | FanEntityFeature.TURN_ON
     )

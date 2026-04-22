@@ -15,7 +15,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .ble import async_pair_ac500
+from .ble import async_pair_ac500, async_verify_ac500
 from .const import DEFAULT_NAME, DOMAIN
 from .coordinator import is_ac500_service_info
 
@@ -139,7 +139,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         self,
         user_input: dict[str, Any] | None = None,
     ):
-        """Confirm a discovered device and run pairing."""
+        """Confirm a discovered device and run setup."""
         if user_input is not None:
             return await self.async_step_pair()
 
@@ -244,11 +244,40 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_pair(self, user_input: dict[str, Any] | None = None):
-        """Pair the selected AC500 and create the config entry."""
+        """Set up the AC500 — try simple verification first, fall back to full pairing."""
         assert self._address is not None
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            # First, try a simple connect-and-verify (no pairing handshake).
+            # This succeeds when the device was already paired or doesn't need
+            # a handshake for read-only operations.
+            try:
+                status = await async_verify_ac500(
+                    self.hass,
+                    self._address,
+                    self._discovered_name,
+                    ble_device=self._ble_device,
+                )
+                if status is not None:
+                    _LOGGER.info(
+                        "AC500 %s: verified without pairing handshake",
+                        self._address,
+                    )
+                    return self.async_create_entry(
+                        title=self._discovered_name,
+                        data={
+                            CONF_ADDRESS: self._address,
+                            CONF_NAME: self._discovered_name,
+                        },
+                    )
+            except HomeAssistantError:
+                _LOGGER.debug(
+                    "AC500 %s: simple verification failed, trying full pairing",
+                    self._address,
+                )
+
+            # Fall back to the full EF03 pairing handshake.
             try:
                 await async_pair_ac500(
                     self.hass,

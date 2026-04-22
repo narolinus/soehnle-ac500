@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -13,33 +19,22 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
-from .coordinator import AC500Coordinator
+from .coordinator import AC500Coordinator, AC500RuntimeState
 from .entity import AC500Entity
 
 
-@dataclass(frozen=True, slots=True)
-class AC500SensorDescription:
+@dataclass(frozen=True, kw_only=True)
+class AC500SensorDescription(SensorEntityDescription):
     """Description of an AC500 sensor."""
 
-    key: str
-    name: str
-    value_fn: Callable
-    icon: str | None = None
-    native_unit_of_measurement: str | None = None
-    suggested_unit_of_measurement: str | None = None
-    device_class: SensorDeviceClass | None = None
-    state_class: SensorStateClass | None = None
-    entity_category: EntityCategory | None = None
-    entity_registry_enabled_default: bool = True
-    entity_registry_visible_default: bool = True
-    suggested_display_precision: int | None = None
+    value_fn: Callable[[AC500RuntimeState], Any] = lambda state: None
 
 
 SENSORS: tuple[AC500SensorDescription, ...] = (
     AC500SensorDescription(
         key="pm25",
-        name="PM2.5",
-        value_fn=lambda state: state.status.pm25_ug_m3,
+        translation_key="pm25",
+        value_fn=lambda state: state.status.pm25_ug_m3 if state.status else None,
         native_unit_of_measurement="µg/m³",
         device_class=SensorDeviceClass.PM25,
         state_class=SensorStateClass.MEASUREMENT,
@@ -47,8 +42,8 @@ SENSORS: tuple[AC500SensorDescription, ...] = (
     ),
     AC500SensorDescription(
         key="temperature",
-        name="Temperature",
-        value_fn=lambda state: state.status.temperature_c,
+        translation_key="temperature",
+        value_fn=lambda state: state.status.temperature_c if state.status else None,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -56,8 +51,8 @@ SENSORS: tuple[AC500SensorDescription, ...] = (
     ),
     AC500SensorDescription(
         key="filter",
-        name="Filter life",
-        value_fn=lambda state: state.status.filter_percent,
+        translation_key="filter_life",
+        value_fn=lambda state: state.status.filter_percent if state.status else None,
         native_unit_of_measurement=PERCENTAGE,
         icon="mdi:air-filter",
         state_class=SensorStateClass.MEASUREMENT,
@@ -65,7 +60,7 @@ SENSORS: tuple[AC500SensorDescription, ...] = (
     ),
     AC500SensorDescription(
         key="rssi",
-        name="RSSI",
+        translation_key="rssi",
         value_fn=lambda state: state.rssi,
         native_unit_of_measurement="dBm",
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
@@ -88,22 +83,14 @@ async def async_setup_entry(
 class AC500SensorEntity(AC500Entity, SensorEntity):
     """Representation of an AC500 sensor."""
 
+    entity_description: AC500SensorDescription
+
     def __init__(self, coordinator: AC500Coordinator, description: AC500SensorDescription) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, description.key)
         self.entity_description = description
-        self._attr_name = description.name
-        self._attr_icon = description.icon
-        self._attr_device_class = description.device_class
-        self._attr_state_class = description.state_class
-        self._attr_entity_category = description.entity_category
-        self._attr_native_unit_of_measurement = description.native_unit_of_measurement
-        self._attr_suggested_display_precision = description.suggested_display_precision
 
     @property
     def native_value(self):
         """Return the sensor value."""
-        state = self.coordinator.data
-        if self.entity_description.key != "rssi" and state.status is None:
-            return None
-        return self.entity_description.value_fn(state)
+        return self.entity_description.value_fn(self.coordinator.data)

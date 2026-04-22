@@ -39,5 +39,45 @@
       "pairing_failed": "The AC500 pairing handshake did not complete. Put the purifier into pairing mode, press the Bluetooth button, and try again.",
       "service_discovery_failed": "Bluetooth connected, but GATT services or notifications could not be initialized. Try again after a few seconds."
     }
+  },
+  "entity": {
+    "fan": {
+      "fan": {
+        "name": "Air purifier"
+      }
+    },
+    "sensor": {
+      "pm25": {
+        "name": "PM2.5"
+      },
+      "temperature": {
+        "name": "Temperature"
+      },
+      "filter_life": {
+        "name": "Filter life"
+      },
+      "rssi": {
+        "name": "RSSI"
+      }
+    },
+    "select": {
+      "timer": {
+        "name": "Timer"
+      }
+    },
+    "switch": {
+      "uv": {
+        "name": "UV-C"
+      },
+      "auto": {
+        "name": "Auto mode"
+      },
+      "night": {
+        "name": "Night mode"
+      },
+      "buzzer": {
+        "name": "Buzzer"
+      }
+    }
   }
 }

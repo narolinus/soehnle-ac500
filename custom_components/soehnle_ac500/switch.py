@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
@@ -14,48 +14,42 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import DOMAIN
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
+from .protocol import AC500Status
 
 
-@dataclass(frozen=True, slots=True)
-class AC500SwitchDescription:
+@dataclass(frozen=True, kw_only=True)
+class AC500SwitchDescription(SwitchEntityDescription):
     """Description of an AC500 switch."""
 
-    key: str
-    name: str
-    icon: str
-    value_fn: Callable
-    setter_name: str
-    device_class: str | None = None
-    entity_registry_enabled_default: bool = True
-    entity_registry_visible_default: bool = True
-    entity_category: EntityCategory | None = None
+    value_fn: Callable[[AC500Status], bool] = lambda status: False
+    setter_name: str = ""
 
 
 SWITCHES: tuple[AC500SwitchDescription, ...] = (
     AC500SwitchDescription(
         key="uv",
-        name="UV-C",
+        translation_key="uv",
         icon="mdi:lightbulb-ultraviolet",
         value_fn=lambda status: status.uv_enabled,
         setter_name="async_set_uv",
     ),
     AC500SwitchDescription(
         key="auto",
-        name="Auto mode",
+        translation_key="auto",
         icon="mdi:brightness-auto",
         value_fn=lambda status: status.auto_enabled,
         setter_name="async_set_auto",
     ),
     AC500SwitchDescription(
         key="night",
-        name="Night mode",
+        translation_key="night",
         icon="mdi:weather-night",
         value_fn=lambda status: status.night_enabled,
         setter_name="async_set_night",
     ),
     AC500SwitchDescription(
         key="buzzer",
-        name="Buzzer",
+        translation_key="buzzer",
         icon="mdi:volume-high",
         value_fn=lambda status: status.buzzer_enabled,
         setter_name="async_set_buzzer",
@@ -77,13 +71,12 @@ async def async_setup_entry(
 class AC500SwitchEntity(AC500Entity, SwitchEntity):
     """Representation of a switchable AC500 setting."""
 
+    entity_description: AC500SwitchDescription
+
     def __init__(self, coordinator: AC500Coordinator, description: AC500SwitchDescription) -> None:
         """Initialize the switch."""
         super().__init__(coordinator, description.key)
         self.entity_description = description
-        self._attr_name = description.name
-        self._attr_icon = description.icon
-        self._attr_entity_category = description.entity_category
 
     @property
     def is_on(self) -> bool | None:
