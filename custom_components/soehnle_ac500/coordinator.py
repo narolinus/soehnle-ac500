@@ -262,7 +262,7 @@ class AC500ConnectionManager:
         ack = await self._async_wait_for_ack(expected_ack, timeout=timeout)
         if ack != expected_ack:
             raise HomeAssistantError(
-                "No AC500 pairing acknowledgement received. Press the Bluetooth button on the purifier and try again."
+                "No AC500 pairing acknowledgement received. Ensure the purifier is powered on and in range."
             )
 
         _LOGGER.debug("Received AC500 pairing ack from %s", self.address)
@@ -394,6 +394,27 @@ class AC500ConnectionManager:
 
         async with self._operation_lock:
             await self._async_enter_control_mode_unlocked()
+
+            # Auto-pairing: run the EF03 handshake on first connection.
+            # The config flow no longer handles BLE — we do everything here.
+            if not self._handshake_done:
+                try:
+                    await self._async_run_handshake_unlocked(timeout=10.0)
+                    _LOGGER.info(
+                        "AC500 %s: pairing handshake completed",
+                        self.address,
+                    )
+                except HomeAssistantError as err:
+                    _LOGGER.warning(
+                        "AC500 %s: auto-pairing handshake failed: %s "
+                        "(the device may already be paired)",
+                        self.address,
+                        err,
+                    )
+                    # Mark as done anyway — if the device is already paired,
+                    # the handshake is not needed.  The control session will
+                    # work regardless.
+                    self._handshake_done = True
 
         # Keepalive loop.  Tolerate multiple consecutive failures before
         # dropping the session; a single proxy hiccup should not kill us.

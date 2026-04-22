@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from typing import Any
 
 import voluptuous as vol
-from bleak.backends.device import BLEDevice
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import callback
-from homeassistant.exceptions import HomeAssistantError
 
-from .ble import async_pair_ac500
 from .const import DEFAULT_NAME, DOMAIN
 from .coordinator import is_ac500_service_info
 
@@ -65,7 +61,15 @@ def _discovered_ac500_devices(hass) -> dict[str, str]:
 
 
 class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for the Soehnle AC500."""
+    """Handle a config flow for the Soehnle AC500.
+
+    This config flow does NOT open a BLE connection to the device.
+    It only checks that the device is visible in the Bluetooth scanner
+    and creates the config entry.  The coordinator handles all BLE
+    operations (connection, pairing handshake, keepalive) once the
+    entry is loaded.  This avoids BlueZ "Notify acquired" conflicts
+    and proxy timeout issues during setup.
+    """
 
     VERSION = 1
 
@@ -73,7 +77,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._discovered_name = DEFAULT_NAME
         self._address: str | None = None
-        self._ble_device: BLEDevice | None = None
         self._source: str | None = None
         self._rssi: int | None = None
 
@@ -82,14 +85,12 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         self,
         address: str,
         name: str,
-        ble_device: BLEDevice | None = None,
         source: str | None = None,
         rssi: int | None = None,
     ) -> None:
         """Store the current target device."""
         self._address = _normalize_address(address)
         self._discovered_name = _display_name(name or DEFAULT_NAME, self._address)
-        self._ble_device = ble_device
         self._source = source
         self._rssi = rssi
 
@@ -103,10 +104,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             parts.append(f"RSSI: {self._rssi} dBm")
         return " | ".join(parts) if parts else "Scanner/RSSI unknown"
 
-    @callback
-    def _pair_schema(self) -> vol.Schema:
-        """Return the schema for the pair step."""
-        return vol.Schema({})
+    # ----- Auto-discovery via HA Bluetooth -----
 
     async def async_step_bluetooth(
         self,
@@ -118,7 +116,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._set_target(
             address,
             name,
-            discovery_info.device,
             getattr(discovery_info, "source", None),
             discovery_info.rssi,
         )
@@ -140,9 +137,11 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         self,
         user_input: dict[str, Any] | None = None,
     ):
-        """Confirm a discovered device and run setup."""
+        """Confirm a discovered device and create the entry."""
         if user_input is not None:
-            return await self.async_step_pair()
+            # No BLE connection needed — just create the entry.
+            # The coordinator handles connection, pairing, and everything else.
+            return self._create_entry()
 
         return self.async_show_form(
             step_id="confirm_bluetooth",
@@ -153,6 +152,8 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                 "details": self._details_text(),
             },
         )
+
+    # ----- Manual setup -----
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle initial setup."""
@@ -171,7 +172,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         elif not discovered:
             errors["base"] = "no_devices_found"
 
-        if user_input is not None:
+        if user_input is not None and not errors:
             address = _normalize_address(user_input[CONF_ADDRESS])
             service_info = bluetooth.async_last_service_info(
                 self.hass,
@@ -181,7 +182,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             self._set_target(
                 address,
                 _title_from_service_info(service_info),
-                service_info.device if service_info else None,
                 getattr(service_info, "source", None) if service_info else None,
                 service_info.rssi if service_info else None,
             )
@@ -192,7 +192,8 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_NAME: self._discovered_name,
                 }
             )
-            return await self.async_step_pair()
+            # No BLE connection — create entry immediately.
+            return self._create_entry()
 
         schema = vol.Schema(
             {
@@ -225,7 +226,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._set_target(
                     address,
                     _title_from_service_info(service_info),
-                    service_info.device if service_info else None,
                     getattr(service_info, "source", None) if service_info else None,
                     service_info.rssi if service_info else None,
                 )
@@ -236,7 +236,8 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_NAME: self._discovered_name,
                     }
                 )
-                return await self.async_step_pair()
+                # No BLE connection — create entry immediately.
+                return self._create_entry()
 
         return self.async_show_form(
             step_id="manual",
@@ -244,108 +245,23 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _async_stop_existing_coordinator(self) -> bool:
-        """Stop a running coordinator for this device, if any.
+    # ----- Entry creation -----
 
-        BlueZ gives exclusive notification file descriptors — if the
-        coordinator already holds them, no second client can subscribe.
-        Returns True if a coordinator was stopped (so we can restart it
-        if pairing fails).
+    def _create_entry(self):
+        """Create the config entry without a BLE connection.
+
+        The coordinator will handle the first connection, the EF03 pairing
+        handshake, and ongoing state management.
         """
-        assert self._address is not None
-        domain_data: dict = self.hass.data.get(DOMAIN, {})
-        for entry_id, coordinator in list(domain_data.items()):
-            if (
-                hasattr(coordinator, "manager")
-                and getattr(coordinator.manager, "address", None) == self._address
-            ):
-                _LOGGER.debug(
-                    "AC500 config flow: stopping coordinator for %s "
-                    "to free BlueZ notification FDs",
-                    self._address,
-                )
-                await coordinator.async_stop()
-                return True
-        return False
-
-    async def _async_restart_existing_coordinator(self) -> None:
-        """Restart a previously stopped coordinator for this device."""
-        assert self._address is not None
-        domain_data: dict = self.hass.data.get(DOMAIN, {})
-        for entry_id, coordinator in list(domain_data.items()):
-            if (
-                hasattr(coordinator, "manager")
-                and getattr(coordinator.manager, "address", None) == self._address
-            ):
-                _LOGGER.debug(
-                    "AC500 config flow: restarting coordinator for %s",
-                    self._address,
-                )
-                await coordinator.async_start()
-                return
-
-    async def async_step_pair(self, user_input: dict[str, Any] | None = None):
-        """Set up the AC500 — connect and run the pairing handshake."""
-        assert self._address is not None
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Stop any running coordinator for this device first.
-            # BlueZ's AcquireNotify gives exclusive FDs — if the coordinator
-            # already holds them, our start_notify will fail with
-            # "NotPermitted: Notify acquired".
-            coordinator_was_running = await self._async_stop_existing_coordinator()
-            # Give BlueZ a moment to release the FDs after stopping.
-            await asyncio.sleep(0.5)
-
-            try:
-                await async_pair_ac500(
-                    self.hass,
-                    self._address,
-                    self._discovered_name,
-                    ble_device=self._ble_device,
-                )
-            except HomeAssistantError as err:
-                message = str(err).lower()
-                if "not visible" in message:
-                    errors["base"] = "device_not_found"
-                elif "pairing acknowledgement" in message:
-                    errors["base"] = "pairing_failed"
-                elif "authentication failed" in message or "authentication canceled" in message:
-                    errors["base"] = "authentication_failed"
-                elif "notification" in message or "service discovery" in message:
-                    errors["base"] = "service_discovery_failed"
-                elif "timeout" in message or "failed to connect" in message:
-                    errors["base"] = "cannot_connect"
-                else:
-                    errors["base"] = "cannot_connect"
-                _LOGGER.warning("AC500 pairing for %s failed: %s", self._address, err)
-                # Restart the coordinator if we stopped it and pairing failed.
-                if coordinator_was_running:
-                    await self._async_restart_existing_coordinator()
-            except Exception:  # pragma: no cover - defensive UX fallback
-                _LOGGER.exception("Unexpected AC500 setup error for %s", self._address)
-                errors["base"] = "cannot_connect"
-                if coordinator_was_running:
-                    await self._async_restart_existing_coordinator()
-            else:
-                # SUCCESS — coordinator will be recreated by async_setup_entry
-                # when the new config entry is loaded.
-                return self.async_create_entry(
-                    title=self._discovered_name,
-                    data={
-                        CONF_ADDRESS: self._address,
-                        CONF_NAME: self._discovered_name,
-                    },
-                )
-
-        return self.async_show_form(
-            step_id="pair",
-            data_schema=self._pair_schema(),
-            errors=errors,
-            description_placeholders={
-                "name": self._discovered_name,
-                "address": self._address,
-                "details": self._details_text(),
+        _LOGGER.info(
+            "AC500 %s: creating config entry — "
+            "the coordinator will handle connection and pairing",
+            self._address,
+        )
+        return self.async_create_entry(
+            title=self._discovered_name,
+            data={
+                CONF_ADDRESS: self._address,
+                CONF_NAME: self._discovered_name,
             },
         )

@@ -21,23 +21,13 @@
       },
       "confirm_bluetooth": {
         "title": "{name} einrichten",
-        "description": "Ein sichtbarer AC500 wurde unter {address} erkannt. {details}. Fahre fort, um Pairing zu starten und das Gerät zu Home Assistant hinzuzufügen."
-      },
-      "pair": {
-        "title": "{name} koppeln",
-        "description": "Versetze den AC500 unter {address} in den Pairing-Modus und drücke seine Bluetooth-Taste. Danach sende diesen Schritt ab. {details}. Die Integration führt das Pairing und den Handshake aus und schließt die Einrichtung ab."
+        "description": "Ein Soehnle AC500 wurde unter {address} erkannt. {details}. Fahre fort, um das Gerät zu Home Assistant hinzuzufügen. Verbindung und Kopplung werden automatisch durchgeführt."
       }
     },
     "error": {
-      "authentication_failed": "Das Bluetooth-Pairing wurde von BlueZ abgelehnt. Kopple den AC500 zuerst auf Betriebssystem-Ebene mit dem Home-Assistant-Host und starte die Einrichtung danach erneut.",
-      "cannot_connect": "Verbindung zum AC500 konnte nicht hergestellt werden.",
-      "device_not_found": "Der AC500 ist aktuell über keinen verbindungsfähigen Bluetooth-Adapter oder Proxy sichtbar.",
       "invalid_mac": "Bitte eine gültige Bluetooth-MAC-Adresse im Format AA:BB:CC:DD:EE:FF eingeben.",
       "no_bluetooth_scanner": "Home Assistant hat aktuell keinen verbindungsfähigen Bluetooth-Adapter oder Proxy verfügbar.",
-      "no_devices_found": "Aktuell sind keine sichtbaren AC500-Geräte verfügbar.",
-      "pairing_backend_failed": "Das Bluetooth-Backend konnte das Pairing nicht abschließen.",
-      "pairing_failed": "Der Pairing-Handshake des AC500 wurde nicht abgeschlossen. Versetze das Gerät in den Pairing-Modus, drücke die Bluetooth-Taste und versuche es erneut.",
-      "service_discovery_failed": "Bluetooth war verbunden, aber GATT-Services oder Notifications konnten nicht initialisiert werden. Versuche es nach ein paar Sekunden erneut."
+      "no_devices_found": "Aktuell sind keine sichtbaren AC500-Geräte verfügbar."
     }
   },
   "entity": {
