@@ -11,7 +11,7 @@ from typing import Any
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import establish_connection
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothChange, BluetoothScanningMode
@@ -470,20 +470,21 @@ class AC500ConnectionManager:
     async def _async_disconnect(self) -> None:
         """Disconnect the current client.
 
-        Explicitly stop notifications before disconnecting so that BlueZ
-        releases the exclusive notification file descriptors.  Without this,
-        the next connection's start_notify will fail with 'Notify acquired'.
+        ALWAYS call stop_notify — even if is_connected is False.
+        BlueZ may still hold the notification file descriptors after
+        an unclean disconnect (supervision timeout, proxy reset, etc.).
         """
         client = self._client
         self._client = None
         if client is None:
             return
+        # Release notification FDs regardless of connection state.
+        with contextlib.suppress(Exception):
+            await client.stop_notify(LIVE_DATA_CHAR_UUID)
+        with contextlib.suppress(Exception):
+            await client.stop_notify(ACK_CHAR_UUID)
         with contextlib.suppress(Exception):
             if client.is_connected:
-                with contextlib.suppress(Exception):
-                    await client.stop_notify(LIVE_DATA_CHAR_UUID)
-                with contextlib.suppress(Exception):
-                    await client.stop_notify(ACK_CHAR_UUID)
                 await client.disconnect()
 
     def _clear_connected_state(self) -> None:
@@ -517,32 +518,100 @@ class AC500ConnectionManager:
         )
 
     async def _async_safe_start_notify(self, client: BleakClient, uuid: str, callback) -> None:
-        """Subscribe to notifications, handling BlueZ 'Notify acquired' errors.
+        """Subscribe to notifications, aggressively clearing stale BlueZ state.
 
         BlueZ keeps exclusive notification file descriptors.  If the previous
-        connection was not cleanly torn down (common after crashes, proxy
-        reconnects, or coordinator restarts), the FD is still held and
+        connection was not cleanly torn down, the FD is still held and
         start_notify raises ``NotPermitted: Notify acquired``.
 
-        The standard workaround is to call stop_notify first to release the
-        stale FD, then start_notify again.
+        Strategy:
+        1. Try bleak's stop_notify (handles THIS client's FDs).
+        2. Try bleak's start_notify.
+        3. On failure, call BlueZ's StopNotify D-Bus method DIRECTLY
+           (handles ANY client's stale FDs) and retry start_notify.
         """
+        # 1. Preemptive release via bleak.
+        with contextlib.suppress(Exception):
+            await client.stop_notify(uuid)
+
+        # 2. Try normal subscription.
         try:
             await client.start_notify(uuid, callback)
+            return  # Success!
         except Exception as err:
-            if "Notify acquired" in str(err) or "NotPermitted" in str(err):
+            if "Notify acquired" not in str(err) and "NotPermitted" not in str(err):
+                raise  # Non-notify error — pass through.
+
+            _LOGGER.warning(
+                "AC500 %s: 'Notify acquired' for %s — "
+                "calling BlueZ StopNotify directly via D-Bus",
+                self.address,
+                uuid,
+            )
+
+        # 3. Nuclear option: call BlueZ StopNotify via D-Bus directly.
+        await self._async_force_bluez_stop_notify(client, uuid)
+        await asyncio.sleep(0.3)
+        await client.start_notify(uuid, callback)
+
+    async def _async_force_bluez_stop_notify(self, client: BleakClient, char_uuid: str) -> None:
+        """Call StopNotify on the BlueZ D-Bus characteristic object directly.
+
+        This bypasses bleak's internal FD tracking and forces BlueZ to
+        release the notification for ANY client that holds it.
+        """
+        try:
+            from dbus_fast.aio import MessageBus
+            from dbus_fast import Message, MessageType
+
+            # Resolve the D-Bus object path for this characteristic.
+            char_path = self._resolve_char_dbus_path(client, char_uuid)
+            if char_path is None:
                 _LOGGER.debug(
-                    "AC500 %s: notification already acquired for %s, "
-                    "releasing and retrying",
-                    self.address,
-                    uuid,
+                    "AC500 %s: could not resolve D-Bus path for %s",
+                    self.address, char_uuid,
                 )
-                with contextlib.suppress(Exception):
-                    await client.stop_notify(uuid)
-                await asyncio.sleep(0.1)
-                await client.start_notify(uuid, callback)
-            else:
-                raise
+                return
+
+            _LOGGER.debug(
+                "AC500 %s: calling StopNotify on %s",
+                self.address, char_path,
+            )
+            bus = await MessageBus(bus_type=2).connect()  # 2 = system bus
+            try:
+                reply = await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path=char_path,
+                        interface="org.bluez.GattCharacteristic1",
+                        member="StopNotify",
+                    )
+                )
+                if reply.message_type == MessageType.ERROR:
+                    _LOGGER.debug(
+                        "AC500 %s: StopNotify error: %s %s",
+                        self.address, reply.error_name, reply.body,
+                    )
+            finally:
+                bus.disconnect()
+        except Exception as err:
+            _LOGGER.debug(
+                "AC500 %s: direct BlueZ StopNotify failed: %s",
+                self.address, err,
+            )
+
+    @staticmethod
+    def _resolve_char_dbus_path(client: BleakClient, char_uuid: str) -> str | None:
+        """Resolve the BlueZ D-Bus object path for a GATT characteristic."""
+        services = getattr(client, "services", None)
+        if services is None:
+            return None
+        for char in services.characteristics.values():
+            if char.uuid == char_uuid:
+                # bleak stores the D-Bus path as the characteristic's 'path' or 'obj' attr.
+                path = getattr(char, "path", None) or getattr(char, "obj", {}).get("Path")
+                return path
+        return None
 
     async def _async_connect_via_ha_bluetooth(
         self,
@@ -551,8 +620,11 @@ class AC500ConnectionManager:
     ) -> BleakClient:
         """Connect using Home Assistant's Bluetooth stack.
 
-        Uses plain BleakClient (not BleakClientWithServiceCache) to match
-        the CLI's connection behaviour as closely as possible.
+        MUST use establish_connection with BleakClientWithServiceCache.
+        Proxies (like ESPHome) take >10 seconds to discover GATT services
+        initially. The AC500 drops idle connections after exactly 10s.
+        If we don't cache services, the connection will always time out
+        mid-discovery before we can initialize control mode.
         """
         import time as _time
 
@@ -560,16 +632,14 @@ class AC500ConnectionManager:
             self.hass.loop.call_soon_threadsafe(disconnected_event.set)
 
         _LOGGER.debug(
-            "AC500 %s: connecting (BLEDevice: %s, details=%s)",
+            "AC500 %s: connecting via HA establish_connection",
             self.address,
-            getattr(ble_device, "address", "?"),
-            getattr(ble_device, "details", "?"),
         )
         t0 = _time.monotonic()
 
         try:
             client = await establish_connection(
-                BleakClient,
+                BleakClientWithServiceCache,
                 ble_device,
                 self.name,
                 ble_device_callback=self._async_get_current_ble_device,

@@ -86,18 +86,18 @@ class AC500SetupClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         """Disconnect the temporary client.
 
-        Explicitly stop notifications before disconnecting so that BlueZ
-        releases the notification file descriptors for the next connection.
+        ALWAYS call stop_notify — even if is_connected is False.
+        BlueZ may still hold the notification FDs after an unclean disconnect.
         """
         del exc_type, exc, tb
         if self.client is None:
             return
         with contextlib.suppress(Exception):
+            await self.client.stop_notify(LIVE_DATA_CHAR_UUID)
+        with contextlib.suppress(Exception):
+            await self.client.stop_notify(ACK_CHAR_UUID)
+        with contextlib.suppress(Exception):
             if self.client.is_connected:
-                with contextlib.suppress(Exception):
-                    await self.client.stop_notify(LIVE_DATA_CHAR_UUID)
-                with contextlib.suppress(Exception):
-                    await self.client.stop_notify(ACK_CHAR_UUID)
                 await self.client.disconnect()
         self.client = None
 
@@ -129,29 +129,25 @@ class AC500SetupClient:
             return self.last_status
 
     async def _async_safe_start_notify(self, client: BleakClient, uuid: str, callback) -> None:
-        """Subscribe to notifications, handling BlueZ 'Notify acquired' errors.
+        """Subscribe to notifications, preemptively releasing stale FDs."""
+        with contextlib.suppress(Exception):
+            await client.stop_notify(uuid)
+        await asyncio.sleep(0.1)
 
-        BlueZ keeps exclusive notification file descriptors.  If the previous
-        connection was not cleanly torn down (common after crashes, proxy
-        reconnects, or when the coordinator is still running), the FD is still
-        held and start_notify raises ``NotPermitted: Notify acquired``.
-
-        The standard workaround is to call stop_notify first to release the
-        stale FD, then start_notify again.
-        """
         try:
             await client.start_notify(uuid, callback)
         except Exception as err:
             if "Notify acquired" in str(err) or "NotPermitted" in str(err):
-                _LOGGER.debug(
-                    "AC500 %s: notification already acquired for %s, "
-                    "releasing and retrying",
+                _LOGGER.warning(
+                    "AC500 %s: 'Notify acquired' for %s even after "
+                    "preemptive release — retrying after short delay",
                     self.address,
                     uuid,
                 )
+                await asyncio.sleep(1.0)
                 with contextlib.suppress(Exception):
                     await client.stop_notify(uuid)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
                 await client.start_notify(uuid, callback)
             else:
                 raise
