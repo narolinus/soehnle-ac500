@@ -63,6 +63,12 @@ _KEEPALIVE_FAIL_LIMIT = 3
 _CONNECT_TIMEOUT = 120.0
 
 
+def _is_notify_acquired_error(err: Exception) -> bool:
+    """Return True if the exception looks like a stale BlueZ notify lock."""
+    text = str(err)
+    return "Notify acquired" in text or "NotPermitted" in text
+
+
 @dataclass(slots=True, frozen=True)
 class AC500RuntimeState:
     """Published runtime snapshot."""
@@ -498,26 +504,53 @@ class AC500ConnectionManager:
         # 1. Preemptive release via bleak.
         with contextlib.suppress(Exception):
             await client.stop_notify(uuid)
+        await asyncio.sleep(0.1)
 
         # 2. Try normal subscription.
         try:
             await client.start_notify(uuid, callback)
             return  # Success!
         except Exception as err:
-            if "Notify acquired" not in str(err) and "NotPermitted" not in str(err):
+            if not _is_notify_acquired_error(err):
                 raise  # Non-notify error — pass through.
 
             _LOGGER.warning(
                 "AC500 %s: 'Notify acquired' for %s — "
-                "calling BlueZ StopNotify directly via D-Bus",
+                "retrying notify setup with stale-lock cleanup",
                 self.address,
                 uuid,
             )
 
-        # 3. Nuclear option: call BlueZ StopNotify via D-Bus directly.
-        await self._async_force_bluez_stop_notify(client, uuid)
-        await asyncio.sleep(0.3)
-        await client.start_notify(uuid, callback)
+        # 3. Retry with increasingly aggressive cleanup.
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            with contextlib.suppress(Exception):
+                await client.stop_notify(uuid)
+            await self._async_force_bluez_stop_notify(client, uuid)
+            await asyncio.sleep(0.3 * attempt)
+            try:
+                await client.start_notify(uuid, callback)
+                _LOGGER.debug(
+                    "AC500 %s: notify setup for %s succeeded on retry %d",
+                    self.address,
+                    uuid,
+                    attempt,
+                )
+                return
+            except Exception as err:
+                if not _is_notify_acquired_error(err):
+                    raise
+                last_err = err
+                _LOGGER.debug(
+                    "AC500 %s: notify retry %d for %s still blocked: %s",
+                    self.address,
+                    attempt,
+                    uuid,
+                    err,
+                )
+
+        assert last_err is not None
+        raise last_err
 
     async def _async_force_bluez_stop_notify(self, client: BleakClient, char_uuid: str) -> None:
         """Call StopNotify on the BlueZ D-Bus characteristic object directly.

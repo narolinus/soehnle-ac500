@@ -69,6 +69,11 @@ class AC500ButtonEntity(AC500Entity, ButtonEntity):
         super().__init__(coordinator, description.key)
         self.entity_description = description
 
+    @property
+    def available(self) -> bool:
+        """Buttons must stay usable even if the live status path is currently down."""
+        return True
+
     async def async_press(self) -> None:
         """Handle the button press."""
         await self.entity_description.press_fn(self.coordinator)
