@@ -184,7 +184,7 @@ sensor:
     device_id: ${ac500_device_id}
     device_class: pm25
     state_class: measurement
-    unit_of_measurement: "ug/m3"
+    unit_of_measurement: "μg/m³"
     accuracy_decimals: 1
     icon: mdi:molecule
     update_interval: never
@@ -195,7 +195,7 @@ sensor:
     device_id: ${ac500_device_id}
     device_class: temperature
     state_class: measurement
-    unit_of_measurement: "C"
+    unit_of_measurement: "°C"
     accuracy_decimals: 1
     update_interval: never
 
