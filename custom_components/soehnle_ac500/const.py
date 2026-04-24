@@ -18,6 +18,7 @@ DEFAULT_RECONNECT_SECONDS = 15
 DEFAULT_KEEPALIVE_SECONDS = 12
 
 PLATFORMS: list[Platform] = [
+    Platform.BUTTON,
     Platform.FAN,
     Platform.SELECT,
     Platform.SENSOR,

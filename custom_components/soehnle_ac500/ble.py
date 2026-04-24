@@ -203,9 +203,10 @@ class AC500SetupClient:
     async def async_run_pairing_handshake(self, timeout: float = 20.0) -> None:
         """Run the AC500 pairing handshake over EF03.
 
-        The CLI confirms that this works WITHOUT pressing the Bluetooth
-        button — the device responds automatically to the A2 00 03 probe.
+        Pair the BLE link first, then perform the proprietary EF03
+        handshake. The purifier may require pressing its Bluetooth button.
         """
+        await self.async_ensure_ble_link_paired()
         expected_ack = build_frame(0xA2, 0x00, 0x02)
         self.last_ack = None
         self.ack_event.clear()
@@ -275,19 +276,40 @@ class AC500SetupClient:
             finally:
                 self.ack_event.clear()
 
+    async def async_ensure_ble_link_paired(self) -> None:
+        """Ensure the BLE link itself is paired/bonded."""
+        if self.client is None:
+            raise HomeAssistantError("The AC500 is not connected")
+
+        pair_method = getattr(self.client, "pair", None)
+        if not callable(pair_method):
+            _LOGGER.debug("AC500 %s: bleak backend does not expose pair()", self.address)
+            return
+
+        try:
+            await pair_method()
+            await asyncio.sleep(0.5)
+        except Exception as err:
+            text = str(err).lower()
+            if (
+                "already" in text and "pair" in text
+            ) or "alreadyexists" in text or "already bonded" in text:
+                return
+            raise HomeAssistantError(f"BLE link pairing failed: {err}") from err
+
     async def async_write_frame(
         self,
         opcode: int,
         arg1: int = 0x00,
         arg2: int = 0x00,
     ) -> None:
-        """Write a frame (fire-and-forget, no ATT response expected)."""
+        """Write a frame."""
         if self.client is None:
             raise HomeAssistantError("The AC500 is not connected")
 
         frame = build_frame(opcode, arg1, arg2)
         try:
-            await self.client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
+            await self.client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
         except Exception as err:
             raise HomeAssistantError(f"Sending the BLE command failed: {err}") from err
 

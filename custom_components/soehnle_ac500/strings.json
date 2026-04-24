@@ -21,7 +21,7 @@
       },
       "confirm_bluetooth": {
         "title": "Set up {name}",
-        "description": "A Soehnle AC500 was discovered at {address}. {details}. Continue to add it to Home Assistant. Connection and pairing will be handled automatically."
+        "description": "A Soehnle AC500 was discovered at {address}. {details}. Continue to add it to Home Assistant. The integration will manage the connection automatically. If pairing is still required afterwards, use the Pair action and press the purifier's Bluetooth button."
       }
     },
     "error": {
@@ -31,6 +31,17 @@
     }
   },
   "entity": {
+    "button": {
+      "pair": {
+        "name": "Pair"
+      },
+      "refresh": {
+        "name": "Refresh"
+      },
+      "reconnect": {
+        "name": "Reconnect"
+      }
+    },
     "fan": {
       "fan": {
         "name": "Air purifier"

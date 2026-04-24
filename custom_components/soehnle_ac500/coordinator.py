@@ -58,8 +58,9 @@ _MAX_RECONNECT_DELAY = 120.0
 _KEEPALIVE_FAIL_LIMIT = 3
 
 # BLE connection timeout — must be long enough for HA's Bluetooth stack
-# to complete connect + GATT service discovery.
-_CONNECT_TIMEOUT = 30.0
+# to complete connect + GATT service discovery, even if the connection
+# request is queued behind other devices by ESPHome or BlueZ.
+_CONNECT_TIMEOUT = 120.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +116,7 @@ class AC500ConnectionManager:
         self._last_error: str | None = None
         self._consecutive_failures: int = 0
         self._handshake_done: bool = False
+        self._ble_link_paired: bool = False
 
     @property
     def state(self) -> AC500RuntimeState:
@@ -243,16 +245,28 @@ class AC500ConnectionManager:
                 timeout=5.0,
             )
             if status is None or status.fan_label != level:
-                raise HomeAssistantError("The AC500 did not confirm the requested fan level")
+                raise HomeAssistantError(
+                    "The AC500 did not confirm the requested fan level. "
+                    "If control is not active yet, run the Pair action in Home Assistant "
+                    "and press the Bluetooth button on the purifier."
+                )
+            self._ble_link_paired = True
+            self._handshake_done = True
 
     async def async_run_pairing_handshake(self) -> None:
         """Run the AC500 onboarding handshake on the active connection."""
         async with self._operation_lock:
             await self._async_ensure_connected()
             await self._async_run_handshake_unlocked()
+            await self._async_request_status_unlocked()
+
+    async def async_reconnect(self) -> None:
+        """Force a reconnect cycle."""
+        self._trigger_reconnect()
 
     async def _async_run_handshake_unlocked(self, timeout: float = 20.0) -> None:
         """Execute the EF03 pairing handshake (must hold _operation_lock)."""
+        await self._async_ensure_ble_link_paired_unlocked()
         expected_ack = build_frame(0xA2, 0x00, 0x02)
         self._last_ack = None
         self._ack_event.clear()
@@ -275,48 +289,24 @@ class AC500ConnectionManager:
         """Send a command and wait until the status reflects it.
 
         Mirrors the CLI pattern: re-enter control mode (AF 00 01) before each
-        command to ensure the device is ready to accept writes.  Confirmation
-        comes from the EF02 status notification, NOT from an ATT response.
+        command to ensure the device is ready to accept writes.
         """
         async with self._operation_lock:
             await self._async_ensure_connected()
-
-            # Re-enter control mode before every write, just like the CLI.
             await self._async_enter_control_mode_unlocked()
-
-            # Send the actual command (fire-and-forget).
             await self._async_write_frame_unlocked(*frame)
-
-            # Verify via EF02 notification.
             status = await self._async_wait_for_status(predicate, timeout=5.0)
             if status is None or not predicate(status):
-                # Maybe the handshake hasn't been done — try once.
-                if not self._handshake_done:
-                    _LOGGER.info(
-                        "AC500 %s: command not confirmed, attempting EF03 handshake",
-                        self.address,
-                    )
-                    try:
-                        await self._async_run_handshake_unlocked(timeout=10.0)
-                    except HomeAssistantError:
-                        _LOGGER.warning(
-                            "AC500 %s: auto-handshake failed",
-                            self.address,
-                        )
-                        raise
-                    # Re-enter control mode and retry the command.
-                    await self._async_enter_control_mode_unlocked()
-                    await self._async_write_frame_unlocked(*frame)
-                    status = await self._async_wait_for_status(predicate, timeout=5.0)
-
-                if status is None or not predicate(status):
-                    raise HomeAssistantError(
-                        "The AC500 did not confirm the requested state change"
-                    )
+                raise HomeAssistantError(
+                    "The AC500 did not confirm the requested state change. "
+                    "If control is not active yet, run the Pair action in Home Assistant "
+                    "and press the Bluetooth button on the purifier."
+                )
+            self._ble_link_paired = True
+            self._handshake_done = True
 
     def _trigger_reconnect(self) -> None:
         """Force an immediate reconnect cycle."""
-        self._handshake_done = False
         self._wake_event.set()
         if self._disconnect_event is not None:
             self._disconnect_event.set()
@@ -391,30 +381,6 @@ class AC500ConnectionManager:
 
         self._connected_event.set()
         self._publish_state()
-
-        async with self._operation_lock:
-            await self._async_enter_control_mode_unlocked()
-
-            # Auto-pairing: run the EF03 handshake on first connection.
-            # The config flow no longer handles BLE — we do everything here.
-            if not self._handshake_done:
-                try:
-                    await self._async_run_handshake_unlocked(timeout=10.0)
-                    _LOGGER.info(
-                        "AC500 %s: pairing handshake completed",
-                        self.address,
-                    )
-                except HomeAssistantError as err:
-                    _LOGGER.warning(
-                        "AC500 %s: auto-pairing handshake failed: %s "
-                        "(the device may already be paired)",
-                        self.address,
-                        err,
-                    )
-                    # Mark as done anyway — if the device is already paired,
-                    # the handshake is not needed.  The control session will
-                    # work regardless.
-                    self._handshake_done = True
 
         # Keepalive loop.  Tolerate multiple consecutive failures before
         # dropping the session; a single proxy hiccup should not kill us.
@@ -493,7 +459,6 @@ class AC500ConnectionManager:
         self._disconnect_event = None
         self._ack_event.clear()
         self._live_event.clear()
-        self._handshake_done = False
 
     async def _async_ensure_connected(self) -> None:
         """Ensure an active connection exists."""
@@ -675,6 +640,11 @@ class AC500ConnectionManager:
         write errors are logged and swallowed; we only care about whether
         the device responds with a status notification.
         """
+        if not self._ble_link_paired:
+            _LOGGER.warning(
+                "AC500 %s: BLE link is not marked paired; live status may work while control stays unauthorized",
+                self.address,
+            )
         for _ in range(2):
             try:
                 await self._async_write_frame_unlocked(0xAF, 0x00, 0x01)
@@ -751,25 +721,57 @@ class AC500ConnectionManager:
             finally:
                 self._live_event.clear()
 
+    async def _async_ensure_ble_link_paired_unlocked(self) -> None:
+        """Ensure the BLE link itself is paired/bonded."""
+        if self._ble_link_paired:
+            return
+
+        client = self._client
+        if client is None:
+            raise HomeAssistantError("The AC500 is not connected")
+
+        pair_method = getattr(client, "pair", None)
+        if not callable(pair_method):
+            _LOGGER.debug(
+                "AC500 %s: bleak backend does not expose pair(); continuing without explicit BLE link pairing",
+                self.address,
+            )
+            return
+
+        _LOGGER.info("AC500 %s: requesting BLE link pairing/bonding", self.address)
+        try:
+            await pair_method()
+            await asyncio.sleep(0.5)
+        except Exception as err:
+            text = str(err).lower()
+            if (
+                "already" in text and "pair" in text
+            ) or "alreadyexists" in text or "already bonded" in text:
+                _LOGGER.debug(
+                    "AC500 %s: BLE link was already paired: %s",
+                    self.address,
+                    err,
+                )
+            else:
+                raise HomeAssistantError(f"BLE link pairing failed: {err}") from err
+
+        self._ble_link_paired = True
+
     async def _async_write_frame_unlocked(
         self,
         opcode: int,
         arg1: int = 0x00,
         arg2: int = 0x00,
     ) -> None:
-        """Write one protocol frame (fire-and-forget, no ATT response expected).
-
-        Uses ``response=False`` to avoid ATT error responses that BLE proxies
-        (ESPHome, Shelly) generate for devices that have not been OS-bonded.
-        Command confirmation is done via EF02 notifications instead.
-        """
+        """Write one protocol frame."""
         client = self._client
         if client is None:
             raise HomeAssistantError("The AC500 is not connected")
 
         frame = build_frame(opcode, arg1, arg2)
+        _LOGGER.debug("AC500 %s TX %s", self.address, frame.hex())
         try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=False)
+            await client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
         except Exception as err:
             self._last_error = str(err)
             self._publish_state()
@@ -901,6 +903,10 @@ class AC500Coordinator(DataUpdateCoordinator[AC500RuntimeState]):
     async def async_run_pairing_handshake(self) -> None:
         """Run the AC500 onboarding handshake."""
         await self.manager.async_run_pairing_handshake()
+
+    async def async_reconnect(self) -> None:
+        """Force a reconnect."""
+        await self.manager.async_reconnect()
 
     @callback
     def _async_manager_published(self, state: AC500RuntimeState) -> None:

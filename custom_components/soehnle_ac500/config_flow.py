@@ -66,9 +66,8 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     This config flow does NOT open a BLE connection to the device.
     It only checks that the device is visible in the Bluetooth scanner
     and creates the config entry.  The coordinator handles all BLE
-    operations (connection, pairing handshake, keepalive) once the
-    entry is loaded.  This avoids BlueZ "Notify acquired" conflicts
-    and proxy timeout issues during setup.
+    operations once the entry is loaded. If the purifier still needs
+    onboarding, use the created Pair button afterwards.
     """
 
     VERSION = 1
@@ -140,7 +139,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm a discovered device and create the entry."""
         if user_input is not None:
             # No BLE connection needed — just create the entry.
-            # The coordinator handles connection, pairing, and everything else.
             return self._create_entry()
 
         return self.async_show_form(
@@ -192,7 +190,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_NAME: self._discovered_name,
                 }
             )
-            # No BLE connection — create entry immediately.
             return self._create_entry()
 
         schema = vol.Schema(
@@ -236,7 +233,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_NAME: self._discovered_name,
                     }
                 )
-                # No BLE connection — create entry immediately.
                 return self._create_entry()
 
         return self.async_show_form(
@@ -250,12 +246,13 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     def _create_entry(self):
         """Create the config entry without a BLE connection.
 
-        The coordinator will handle the first connection, the EF03 pairing
-        handshake, and ongoing state management.
+        The coordinator will handle the connection lifecycle. If the purifier
+        still needs pairing, use the Pair button after setup and press the
+        purifier's Bluetooth button.
         """
         _LOGGER.info(
             "AC500 %s: creating config entry — "
-            "the coordinator will handle connection and pairing",
+            "the coordinator will handle connection and runtime control",
             self._address,
         )
         return self.async_create_entry(
