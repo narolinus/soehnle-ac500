@@ -117,6 +117,7 @@ class AC500ConnectionManager:
 
         self._last_status: AC500Status | None = None
         self._last_ack: bytes | None = None
+        self._last_connectable_ble_device: BLEDevice | None = None
         self._rssi: int | None = None
         self._last_seen: datetime | None = None
         self._last_error: str | None = None
@@ -147,7 +148,7 @@ class AC500ConnectionManager:
         self._unsub_bluetooth = bluetooth.async_register_callback(
             self.hass,
             self._async_handle_bluetooth_event,
-            {"address": self.address, "connectable": True},
+            {"address": self.address},
             BluetoothScanningMode.ACTIVE,
         )
         self._task = self.hass.async_create_background_task(
@@ -320,11 +321,7 @@ class AC500ConnectionManager:
     async def _async_connection_loop(self) -> None:
         """Maintain a live connection when the device is present."""
         while not self._stop_event.is_set():
-            ble_device = bluetooth.async_ble_device_from_address(
-                self.hass,
-                self.address,
-                connectable=True,
-            )
+            ble_device = self._async_get_current_ble_device()
 
             if ble_device is None:
                 self._clear_connected_state()
@@ -471,9 +468,13 @@ class AC500ConnectionManager:
         if self._connected_event.is_set() and self._client is not None:
             return
 
+        ble_device = self._async_get_current_ble_device()
         self._wake_event.set()
         try:
-            await asyncio.wait_for(self._connected_event.wait(), timeout=self._reconnect_seconds + 10)
+            timeout = self._reconnect_seconds + 10
+            if ble_device is not None:
+                timeout = max(timeout, _CONNECT_TIMEOUT + 10)
+            await asyncio.wait_for(self._connected_event.wait(), timeout=timeout)
         except TimeoutError as err:
             raise HomeAssistantError("No connectable AC500 is currently available") from err
 
@@ -481,12 +482,20 @@ class AC500ConnectionManager:
             raise HomeAssistantError("The AC500 connection is not ready")
 
     def _async_get_current_ble_device(self) -> BLEDevice | None:
-        """Return the freshest known BLE device object."""
-        return bluetooth.async_ble_device_from_address(
+        """Return the freshest known connectable BLE device object."""
+        ble_device = bluetooth.async_ble_device_from_address(
             self.hass,
             self.address,
             connectable=True,
         )
+        if ble_device is not None:
+            if self._last_connectable_ble_device is None:
+                _LOGGER.debug("AC500 %s: found fresh connectable BLE device", self.address)
+            self._last_connectable_ble_device = ble_device
+            return ble_device
+        if self._last_connectable_ble_device is not None:
+            _LOGGER.debug("AC500 %s: reusing cached connectable BLE device", self.address)
+        return self._last_connectable_ble_device
 
     async def _async_safe_start_notify(self, client: BleakClient, uuid: str, callback) -> None:
         """Subscribe to notifications, aggressively clearing stale BlueZ state.
@@ -818,6 +827,12 @@ class AC500ConnectionManager:
             connectable=True,
         )
         if service_info is None:
+            service_info = bluetooth.async_last_service_info(
+                self.hass,
+                self.address,
+                connectable=False,
+            )
+        if service_info is None:
             return
         self._update_discovery_state(service_info)
 
@@ -841,6 +856,24 @@ class AC500ConnectionManager:
         discovered_name = service_info.name or service_info.device.name or self.name
         if discovered_name:
             self.name = discovered_name
+        if getattr(service_info, "connectable", False):
+            _LOGGER.debug(
+                "AC500 %s: discovery update is connectable (source=%s, rssi=%s)",
+                self.address,
+                getattr(service_info, "source", None),
+                service_info.rssi,
+            )
+            self._last_connectable_ble_device = service_info.device
+        elif ble_device := bluetooth.async_ble_device_from_address(
+            self.hass,
+            self.address,
+            connectable=True,
+        ):
+            _LOGGER.debug(
+                "AC500 %s: discovery update not connectable, but a connectable device is available",
+                self.address,
+            )
+            self._last_connectable_ble_device = ble_device
 
     def _handle_live_data(self, _characteristic: Any, data: bytearray) -> None:
         """Handle a live notify frame."""
