@@ -1,0 +1,612 @@
+globals:
+  - id: ${ac500_id_prefix}_pair_ack_seen
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ${ac500_id_prefix}_pair_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ${ac500_id_prefix}_have_status
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ${ac500_id_prefix}_frame_variant
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: ${ac500_id_prefix}_fan_raw
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: ${ac500_id_prefix}_timer_raw
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: ${ac500_id_prefix}_flags_raw
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: ${ac500_id_prefix}_status_frame_counter
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: ${ac500_id_prefix}_status_wait_from
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: ${ac500_id_prefix}_last_status_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+script:
+  - id: ${ac500_id_prefix}_ensure_connected
+    mode: restart
+    then:
+      - if:
+          condition:
+            binary_sensor.is_off: ${ac500_id_prefix}_connected
+          then:
+            - text_sensor.template.publish:
+                id: ${ac500_id_prefix}_state
+                state: "waiting_for_auto_connect"
+            - wait_until:
+                condition:
+                  binary_sensor.is_on: ${ac500_id_prefix}_connected
+                timeout: 10s
+
+  - id: ${ac500_id_prefix}_enter_control_mode
+    mode: restart
+    then:
+      - lambda: |-
+          if (!id(${ac500_ble_client_id}).is_paired()) {
+            ESP_LOGW(
+                "soehnle_ac500",
+                "%s: BLE-Link nicht gepairt, Datenkanal ok aber Control-Session evtl. nicht autorisiert",
+                "${ac500_name}");
+          }
+      - lambda: |-
+          id(${ac500_id_prefix}_status_wait_from) = id(${ac500_id_prefix}_status_frame_counter);
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0xAF, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: AF 00 01 Write fehlgeschlagen", "${ac500_name}");
+          }
+      - delay: 120ms
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0xAF, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: zweites AF 00 01 Write fehlgeschlagen", "${ac500_name}");
+          }
+      - wait_until:
+          condition:
+            lambda: |-
+              return id(${ac500_id_prefix}_status_frame_counter) != id(${ac500_id_prefix}_status_wait_from);
+          timeout: 2s
+      - lambda: |-
+          if (id(${ac500_id_prefix}_status_frame_counter) == id(${ac500_id_prefix}_status_wait_from)) {
+            ESP_LOGW("soehnle_ac500", "%s: kein frischer Live-Frame nach Control-Mode", "${ac500_name}");
+          }
+      - delay: 200ms
+
+  - id: ${ac500_id_prefix}_initialize_session
+    mode: restart
+    then:
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0xAF, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: Initiales AF 00 01 Write fehlgeschlagen", "${ac500_name}");
+          }
+      - delay: 200ms
+      - script.execute: ${ac500_id_prefix}_request_status
+      - script.wait: ${ac500_id_prefix}_request_status
+
+  - id: ${ac500_id_prefix}_request_status
+    mode: restart
+    then:
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0xA2, 0x00, 0x03)) {
+            ESP_LOGW("soehnle_ac500", "%s: Status-Request fehlgeschlagen", "${ac500_name}");
+          }
+
+  - id: ${ac500_id_prefix}_post_command_refresh
+    mode: restart
+    then:
+      - lambda: |-
+          id(${ac500_id_prefix}_status_wait_from) = id(${ac500_id_prefix}_status_frame_counter);
+      - wait_until:
+          condition:
+            lambda: |-
+              return id(${ac500_id_prefix}_status_frame_counter) != id(${ac500_id_prefix}_status_wait_from);
+          timeout: 2s
+      - if:
+          condition:
+            lambda: |-
+              return id(${ac500_id_prefix}_status_frame_counter) == id(${ac500_id_prefix}_status_wait_from);
+          then:
+            - script.execute: ${ac500_id_prefix}_request_status
+            - script.wait: ${ac500_id_prefix}_request_status
+            - wait_until:
+                condition:
+                  lambda: |-
+                    return id(${ac500_id_prefix}_status_frame_counter) != id(${ac500_id_prefix}_status_wait_from);
+                timeout: 3s
+            - lambda: |-
+                if (id(${ac500_id_prefix}_status_frame_counter) == id(${ac500_id_prefix}_status_wait_from)) {
+                  ESP_LOGW("soehnle_ac500", "%s: kein frischer Status nach Kommando", "${ac500_name}");
+                }
+
+  - id: ${ac500_id_prefix}_finish_pairing
+    mode: restart
+    then:
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0xA2, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: Pairing-Abschluss fehlgeschlagen", "${ac500_name}");
+          }
+      - lambda: |-
+          id(${ac500_id_prefix}_pair_in_progress) = false;
+      - text_sensor.template.publish:
+          id: ${ac500_id_prefix}_state
+          state: "paired"
+      - logger.log: "${ac500_name}: Pairing abgeschlossen, laufende Live-Session bleibt bestehen"
+
+ble_client:
+  - mac_address: ${ac500_mac}
+    id: ${ac500_ble_client_id}
+    auto_connect: true
+    on_connect:
+      then:
+        - logger.log: "${ac500_name}: BLE verbunden"
+        - lambda: |-
+            ESP_LOGI(
+                "soehnle_ac500",
+                "%s: BLE-Link gepairt=%s",
+                "${ac500_name}",
+                id(${ac500_ble_client_id}).is_paired() ? "ja" : "nein");
+        - binary_sensor.template.publish:
+            id: ${ac500_id_prefix}_connected
+            state: ON
+        - text_sensor.template.publish:
+            id: ${ac500_id_prefix}_state
+            state: "connected"
+    on_disconnect:
+      then:
+        - logger.log: "${ac500_name}: BLE getrennt"
+        - binary_sensor.template.publish:
+            id: ${ac500_id_prefix}_connected
+            state: OFF
+        - text_sensor.template.publish:
+            id: ${ac500_id_prefix}_state
+            state: "disconnected"
+
+sensor:
+  - platform: template
+    id: ${ac500_id_prefix}_pm25
+    name: "${ac500_name} PM2.5"
+    device_id: ${ac500_device_id}
+    device_class: pm25
+    state_class: measurement
+    unit_of_measurement: "ug/m3"
+    accuracy_decimals: 1
+    icon: mdi:molecule
+    update_interval: never
+
+  - platform: template
+    id: ${ac500_id_prefix}_temperature
+    name: "${ac500_name} Temperature"
+    device_id: ${ac500_device_id}
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: "C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    id: ${ac500_id_prefix}_filter_percent
+    name: "${ac500_name} Filter"
+    device_id: ${ac500_device_id}
+    state_class: measurement
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: mdi:air-filter
+    update_interval: never
+
+  - platform: ble_client
+    type: rssi
+    ble_client_id: ${ac500_ble_client_id}
+    name: "${ac500_name} RSSI"
+    device_id: ${ac500_device_id}
+    device_class: signal_strength
+    entity_category: diagnostic
+    unit_of_measurement: "dBm"
+    accuracy_decimals: 0
+    update_interval: 30s
+
+  - platform: ble_client
+    id: ${ac500_id_prefix}_live_notifications
+    ble_client_id: ${ac500_ble_client_id}
+    type: characteristic
+    service_uuid: 0000ffa0-0000-1000-8000-00805f9b34fb
+    characteristic_uuid: 0000ef02-0000-1000-8000-00805f9b34fb
+    notify: true
+    update_interval: never
+    internal: true
+    lambda: |-
+      id(${ac500_id_prefix}_last_frame).publish_state(soehnle_ac500::to_hex(x));
+      soehnle_ac500::Status status;
+      if (!soehnle_ac500::parse_live_frame(x, &status)) {
+        id(${ac500_id_prefix}_state).publish_state("live_parse_failed");
+        return {};
+      }
+
+      id(${ac500_id_prefix}_have_status) = true;
+      id(${ac500_id_prefix}_status_frame_counter)++;
+      id(${ac500_id_prefix}_last_status_ms) = millis();
+      id(${ac500_id_prefix}_frame_variant) = status.frame_variant;
+      id(${ac500_id_prefix}_fan_raw) = status.fan_raw;
+      id(${ac500_id_prefix}_timer_raw) = status.timer_raw;
+      id(${ac500_id_prefix}_flags_raw) = status.flags_raw;
+
+      id(${ac500_id_prefix}_pm25).publish_state(status.pm25_ug_m3);
+      id(${ac500_id_prefix}_temperature).publish_state(status.temperature_c);
+      id(${ac500_id_prefix}_filter_percent).publish_state(status.filter_percent);
+
+      id(${ac500_id_prefix}_power).publish_state(status.power_enabled());
+      id(${ac500_id_prefix}_uv).publish_state(status.uv_enabled());
+      id(${ac500_id_prefix}_auto).publish_state(status.auto_enabled());
+      id(${ac500_id_prefix}_night).publish_state(status.night_enabled());
+      id(${ac500_id_prefix}_buzzer).publish_state(status.buzzer_enabled());
+      id(${ac500_id_prefix}_connected).publish_state(true);
+      if (!id(${ac500_id_prefix}_pair_in_progress)) {
+        id(${ac500_id_prefix}_state).publish_state("status_received");
+      }
+
+      const std::string fan_mode = soehnle_ac500::fan_label(status.fan_raw);
+      if (!fan_mode.empty()) {
+        id(${ac500_id_prefix}_fan_mode).publish_state(fan_mode);
+      }
+
+      const std::string timer_mode = soehnle_ac500::timer_label(status.timer_raw);
+      if (!timer_mode.empty()) {
+        id(${ac500_id_prefix}_timer).publish_state(timer_mode);
+      }
+      return status.pm25_ug_m3;
+
+  - platform: ble_client
+    id: ${ac500_id_prefix}_ack_notifications
+    ble_client_id: ${ac500_ble_client_id}
+    type: characteristic
+    service_uuid: 0000ffa0-0000-1000-8000-00805f9b34fb
+    characteristic_uuid: 0000ef03-0000-1000-8000-00805f9b34fb
+    notify: true
+    update_interval: never
+    internal: true
+    lambda: |-
+      id(${ac500_id_prefix}_last_ack).publish_state(soehnle_ac500::to_hex(x));
+      if (soehnle_ac500::is_pair_ack(x)) {
+        id(${ac500_id_prefix}_pair_ack_seen) = true;
+        id(${ac500_id_prefix}_state).publish_state("pair_ack");
+        ESP_LOGI("soehnle_ac500", "%s: Pairing-Ack empfangen", "${ac500_name}");
+        if (id(${ac500_id_prefix}_pair_in_progress)) {
+          id(${ac500_id_prefix}_finish_pairing).execute();
+        }
+      } else {
+        id(${ac500_id_prefix}_state).publish_state("ack_notify");
+      }
+      return {};
+
+binary_sensor:
+  - platform: template
+    id: ${ac500_id_prefix}_connected
+    name: "${ac500_name} Connected"
+    device_id: ${ac500_device_id}
+    device_class: connectivity
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: template
+    id: ${ac500_id_prefix}_state
+    name: "${ac500_name} State"
+    device_id: ${ac500_device_id}
+    entity_category: diagnostic
+    icon: mdi:information-outline
+    update_interval: never
+
+  - platform: template
+    id: ${ac500_id_prefix}_last_frame
+    name: "${ac500_name} Last Frame"
+    device_id: ${ac500_device_id}
+    entity_category: diagnostic
+    icon: mdi:code-braces
+    update_interval: never
+
+  - platform: template
+    id: ${ac500_id_prefix}_last_ack
+    name: "${ac500_name} Last Ack"
+    device_id: ${ac500_device_id}
+    entity_category: diagnostic
+    icon: mdi:code-brackets
+    update_interval: never
+
+switch:
+  - platform: template
+    id: ${ac500_id_prefix}_power
+    name: "${ac500_name} Power"
+    device_id: ${ac500_device_id}
+    icon: mdi:power
+    turn_on_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x01, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: Power on fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+    turn_off_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x01, 0x00, 0x00)) {
+            ESP_LOGW("soehnle_ac500", "%s: Power off fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+  - platform: template
+    id: ${ac500_id_prefix}_uv
+    name: "${ac500_name} UV-C"
+    device_id: ${ac500_device_id}
+    icon: mdi:lightbulb-cfl
+    turn_on_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x03, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: UV on fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+    turn_off_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x03, 0x00, 0x00)) {
+            ESP_LOGW("soehnle_ac500", "%s: UV off fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+  - platform: template
+    id: ${ac500_id_prefix}_auto
+    name: "${ac500_name} Auto"
+    device_id: ${ac500_device_id}
+    icon: mdi:fan-auto
+    turn_on_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x05, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: Auto on fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+    turn_off_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x05, 0x00, 0x00)) {
+            ESP_LOGW("soehnle_ac500", "%s: Auto off fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+  - platform: template
+    id: ${ac500_id_prefix}_night
+    name: "${ac500_name} Night"
+    device_id: ${ac500_device_id}
+    icon: mdi:weather-night
+    turn_on_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x06, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: Night on fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+    turn_off_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x06, 0x00, 0x00)) {
+            ESP_LOGW("soehnle_ac500", "%s: Night off fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+  - platform: template
+    id: ${ac500_id_prefix}_buzzer
+    name: "${ac500_name} Buzzer"
+    device_id: ${ac500_device_id}
+    icon: mdi:volume-high
+    entity_category: config
+    turn_on_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x08, 0x00, 0x01)) {
+            ESP_LOGW("soehnle_ac500", "%s: Buzzer on fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+    turn_off_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x08, 0x00, 0x00)) {
+            ESP_LOGW("soehnle_ac500", "%s: Buzzer off fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+select:
+  - platform: template
+    id: ${ac500_id_prefix}_fan_mode
+    name: "${ac500_name} Fan Mode"
+    device_id: ${ac500_device_id}
+    icon: mdi:fan
+    options:
+      - "Low"
+      - "Medium"
+      - "High"
+      - "Turbo"
+    set_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - if:
+          condition:
+            lambda: |-
+              return (id(${ac500_id_prefix}_flags_raw) & 0x20U) != 0;
+          then:
+            - lambda: |-
+                if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x05, 0x00, 0x00)) {
+                  ESP_LOGW("soehnle_ac500", "%s: Auto off vor Fan-Wechsel fehlgeschlagen", "${ac500_name}");
+                }
+            - delay: 250ms
+      - lambda: |-
+          const uint8_t fan = soehnle_ac500::fan_value_from_label(x);
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x02, 0x00, fan)) {
+            ESP_LOGW("soehnle_ac500", "%s: Fan-Wechsel fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+  - platform: template
+    id: ${ac500_id_prefix}_timer
+    name: "${ac500_name} Timer"
+    device_id: ${ac500_device_id}
+    icon: mdi:timer-outline
+    options:
+      - "Off"
+      - "2 h"
+      - "4 h"
+      - "8 h"
+    set_action:
+      - script.execute: ${ac500_id_prefix}_ensure_connected
+      - script.wait: ${ac500_id_prefix}_ensure_connected
+      - script.execute: ${ac500_id_prefix}_enter_control_mode
+      - script.wait: ${ac500_id_prefix}_enter_control_mode
+      - lambda: |-
+          const uint8_t timer = soehnle_ac500::timer_value_from_label(x);
+          if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0x04, 0x00, timer)) {
+            ESP_LOGW("soehnle_ac500", "%s: Timer-Wechsel fehlgeschlagen", "${ac500_name}");
+          }
+      - script.execute: ${ac500_id_prefix}_post_command_refresh
+      - script.wait: ${ac500_id_prefix}_post_command_refresh
+
+button:
+  - platform: template
+    name: "${ac500_name} Pair"
+    device_id: ${ac500_device_id}
+    icon: mdi:bluetooth-connect
+    entity_category: config
+    on_press:
+      then:
+        - logger.log: "${ac500_name}: Pairing gestartet, jetzt Bluetooth-Taste am Geraet druecken"
+        - lambda: |-
+            id(${ac500_id_prefix}_pair_ack_seen) = false;
+            id(${ac500_id_prefix}_pair_in_progress) = true;
+        - text_sensor.template.publish:
+            id: ${ac500_id_prefix}_state
+            state: "pairing"
+        - script.execute: ${ac500_id_prefix}_ensure_connected
+        - script.wait: ${ac500_id_prefix}_ensure_connected
+        - lambda: |-
+            if (!soehnle_ac500::ensure_ble_link_paired(id(${ac500_ble_client_id}))) {
+              ESP_LOGW("soehnle_ac500", "%s: BLE-Link-Pairing konnte nicht gestartet werden", "${ac500_name}");
+            }
+        - delay: 500ms
+        - lambda: |-
+            ESP_LOGI(
+                "soehnle_ac500",
+                "%s: BLE-Link gepairt=%s",
+                "${ac500_name}",
+                id(${ac500_ble_client_id}).is_paired() ? "ja" : "nein");
+        - lambda: |-
+            if (!soehnle_ac500::write_command(id(${ac500_ble_client_id}), 0xA2, 0x00, 0x03)) {
+              ESP_LOGW("soehnle_ac500", "%s: Pairing-Request fehlgeschlagen", "${ac500_name}");
+            }
+        - delay: 20s
+        - if:
+            condition:
+              lambda: |-
+                return id(${ac500_id_prefix}_pair_in_progress);
+            then:
+              - lambda: |-
+                  id(${ac500_id_prefix}_pair_in_progress) = false;
+              - text_sensor.template.publish:
+                  id: ${ac500_id_prefix}_state
+                  state: "pair_timeout"
+              - logger.log: "${ac500_name}: Kein Pairing-Ack empfangen"
+
+  - platform: template
+    name: "${ac500_name} Refresh"
+    device_id: ${ac500_device_id}
+    icon: mdi:refresh
+    entity_category: diagnostic
+    on_press:
+      then:
+        - logger.log: "${ac500_name}: Refresh angefordert"
+        - script.execute: ${ac500_id_prefix}_ensure_connected
+        - script.wait: ${ac500_id_prefix}_ensure_connected
+        - script.execute: ${ac500_id_prefix}_enter_control_mode
+        - script.wait: ${ac500_id_prefix}_enter_control_mode
+        - script.execute: ${ac500_id_prefix}_request_status
+        - script.wait: ${ac500_id_prefix}_request_status
+
+  - platform: template
+    name: "${ac500_name} Reconnect"
+    device_id: ${ac500_device_id}
+    icon: mdi:bluetooth-transfer
+    entity_category: diagnostic
+    on_press:
+      then:
+        - logger.log: "${ac500_name}: Reconnect angefordert"
+        - ble_client.disconnect: ${ac500_ble_client_id}
+        - delay: 500ms
+        - script.execute: ${ac500_id_prefix}_ensure_connected
+        - script.wait: ${ac500_id_prefix}_ensure_connected
+
+interval:
+  - interval: 20s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(${ac500_id_prefix}_connected).state &&
+                     !id(${ac500_id_prefix}_pair_in_progress) &&
+                     (millis() - id(${ac500_id_prefix}_last_status_ms) > 5000U);
+          then:
+            - script.execute: ${ac500_id_prefix}_request_status
+            - script.wait: ${ac500_id_prefix}_request_status

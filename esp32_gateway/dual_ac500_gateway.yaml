@@ -1,0 +1,78 @@
+substitutions:
+  node_name: soehnle-gateway-dual
+  friendly_name: Soehnle Gateway Dual
+  living_room_ac500_name: Living Room AC500
+  living_room_ac500_mac: "E0:07:18:02:29:89"
+  bedroom_ac500_name: Bedroom AC500
+  bedroom_ac500_mac: "E0:07:18:02:2A:00"
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.4.0
+  comment: ESP32 gateway for two Soehnle AC500 purifiers
+  includes:
+    - includes/soehnle_ac500_helpers.h
+  devices:
+    - id: living_room_ac500_device
+      name: "${living_room_ac500_name}"
+    - id: bedroom_ac500_device
+      name: "${bedroom_ac500_name}"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+esp32_ble:
+  io_capability: none
+  connection_timeout: 20s
+  max_connections: 3
+  max_notifications: 24
+  disable_bt_logs: true
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+
+esp32_ble_tracker:
+  software_coexistence: true
+  scan_parameters:
+    active: true
+    interval: 320ms
+    window: 30ms
+
+packages:
+  living_room_ac500: !include
+    file: packages/ac500_device.yaml
+    vars:
+      ac500_name: "${living_room_ac500_name}"
+      ac500_id_prefix: living_room_ac500
+      ac500_device_id: living_room_ac500_device
+      ac500_ble_client_id: living_room_ac500_client
+      ac500_mac: "${living_room_ac500_mac}"
+
+  bedroom_ac500: !include
+    file: packages/ac500_device.yaml
+    vars:
+      ac500_name: "${bedroom_ac500_name}"
+      ac500_id_prefix: bedroom_ac500
+      ac500_device_id: bedroom_ac500_device
+      ac500_ble_client_id: bedroom_ac500_client
+      ac500_mac: "${bedroom_ac500_mac}"
