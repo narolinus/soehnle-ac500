@@ -122,6 +122,16 @@ SENSORS = (
         value_fn=lambda coordinator: coordinator.device.last_ack_hex,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    AC500SensorDescription(
+        key="last_error",
+        translation_key="last_error",
+        icon="mdi:alert-circle-outline",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        value_fn=lambda coordinator: coordinator.device.last_error,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
 )
 
 

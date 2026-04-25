@@ -88,17 +88,20 @@ class AC500Device:
     async def async_update(self) -> AC500Status | None:
         """Fetch a fresh status frame in a short BLE session."""
         async with self._lock:
+            opened_here = not self._is_connected
             try:
                 await self._connect(notify_live=True, notify_ack=False)
                 status = await self._initialize_session()
                 self.last_error = None
                 return status
             finally:
-                await self._disconnect()
+                if opened_here:
+                    await self._disconnect()
 
     async def async_pair(self) -> AC500Status | None:
         """Run BLE pairing, then the observed proprietary AC500 handshake."""
         async with self._lock:
+            paired = False
             try:
                 await self._connect(
                     notify_live=False,
@@ -130,23 +133,49 @@ class AC500Device:
                 await self._write_command(0xA2, 0x00, 0x01)
                 await asyncio.sleep(0.3)
                 self.state = STATE_PAIRED
+                paired = True
                 self._notify()
-                await self._stop_notify(ACK_CHAR_UUID)
-                await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
-                return await self._initialize_session()
+
+                try:
+                    await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
+                    return await self._initialize_session()
+                except AC500CommunicationError as err:
+                    # Pairing succeeded. Keep the connection and state so a later
+                    # Refresh can retry the live notification channel.
+                    self.last_error = str(err)
+                    self.state = STATE_PAIRED
+                    self._notify()
+                    return self.last_status
+            except AC500CommunicationError:
+                raise
             finally:
-                await self._disconnect()
+                if not paired:
+                    await self._disconnect()
+
+    async def async_disconnect(self) -> None:
+        """Disconnect from the purifier."""
+        async with self._lock:
+            await self._disconnect(force_state=True)
+
+    async def async_connect_and_update(self) -> AC500Status | None:
+        """Open a live session and keep it connected."""
+        async with self._lock:
+            await self._connect(notify_live=True, notify_ack=False)
+            status = await self._initialize_session()
+            self.last_error = None
+            return status
+
+    async def async_refresh(self) -> AC500Status | None:
+        """Refresh status without disconnecting an existing session."""
+        return await self.async_update()
 
     async def async_reconnect(self) -> AC500Status | None:
         """Disconnect and read status again."""
         async with self._lock:
-            await self._disconnect()
+            await self._disconnect(force_state=True)
             await asyncio.sleep(0.5)
-            try:
-                await self._connect(notify_live=True, notify_ack=False)
-                return await self._initialize_session()
-            finally:
-                await self._disconnect()
+            await self._connect(notify_live=True, notify_ack=False)
+            return await self._initialize_session()
 
     async def async_set_power(self, enabled: bool) -> AC500Status | None:
         """Turn the purifier power on or off."""
@@ -188,6 +217,7 @@ class AC500Device:
         fan = FAN_VALUES[mode]
 
         async with self._lock:
+            opened_here = not self._is_connected
             try:
                 await self._connect(notify_live=True, notify_ack=False)
                 await self._enter_control_mode()
@@ -214,7 +244,8 @@ class AC500Device:
                 self._notify()
                 return status
             finally:
-                await self._disconnect()
+                if opened_here:
+                    await self._disconnect()
 
     async def async_set_timer(self, option: str) -> AC500Status | None:
         """Set the timer option."""
@@ -240,6 +271,7 @@ class AC500Device:
     ) -> AC500Status | None:
         """Run one control-mode command and refresh status."""
         async with self._lock:
+            opened_here = not self._is_connected
             try:
                 await self._connect(notify_live=True, notify_ack=False)
                 await self._enter_control_mode()
@@ -254,7 +286,8 @@ class AC500Device:
                 self._notify()
                 return status
             finally:
-                await self._disconnect()
+                if opened_here:
+                    await self._disconnect()
 
     async def _connect(
         self,
@@ -264,7 +297,7 @@ class AC500Device:
         pair_before_connect: bool = False,
     ) -> None:
         """Open a BLE connection and subscribe to the requested notifications."""
-        if self._client is not None and self._client.is_connected:
+        if self._is_connected:
             if notify_live:
                 await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
             if notify_ack:
@@ -302,7 +335,7 @@ class AC500Device:
                 await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
             if notify_ack:
                 await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
-        except (BleakError, TimeoutError, asyncio.TimeoutError) as err:
+        except (BleakError, TimeoutError, asyncio.TimeoutError, AC500CommunicationError) as err:
             self.last_error = str(err)
             self.state = STATE_DISCONNECTED
             self.connected = False
@@ -313,7 +346,7 @@ class AC500Device:
         self.state = STATE_CONNECTED
         self._notify()
 
-    async def _disconnect(self) -> None:
+    async def _disconnect(self, *, force_state: bool = False) -> None:
         """Disconnect from the purifier."""
         client = self._client
         if client is not None and client.is_connected:
@@ -326,9 +359,14 @@ class AC500Device:
         self._live_notify_started = False
         self._ack_notify_started = False
         self.connected = False
-        if self.state == STATE_CONNECTED:
+        if force_state or self.state == STATE_CONNECTED:
             self.state = STATE_DISCONNECTED
         self._notify()
+
+    @property
+    def _is_connected(self) -> bool:
+        """Return true if a BLE connection is open."""
+        return self._client is not None and self._client.is_connected
 
     async def _start_notify(
         self,
@@ -351,11 +389,71 @@ class AC500Device:
             label = characteristic_uuid
 
         try:
-            await self._client.start_notify(characteristic_uuid, callback)
+            await self._client.start_notify(
+                characteristic_uuid,
+                callback,
+                bluez={"use_start_notify": True},
+            )
+        except TypeError as err:
+            try:
+                await self._client.start_notify(characteristic_uuid, callback)
+            except Exception as fallback_err:
+                err = fallback_err
+            else:
+                self._mark_notify_started(characteristic_uuid)
+                return
+
+            await self._retry_notify_after_error(characteristic_uuid, callback, label, err)
+            return
         except Exception as err:
+            if "Notify acquired" not in str(err):
+                self.last_error = f"Could not enable {label} notifications: {err}"
+                raise AC500CommunicationError(self.last_error) from err
+
+            await self._retry_notify_after_error(characteristic_uuid, callback, label, err)
+            return
+
+        self._mark_notify_started(characteristic_uuid)
+
+    async def _retry_notify_after_error(
+        self,
+        characteristic_uuid: str,
+        callback: Callable[[BleakGATTCharacteristic, bytearray], None],
+        label: str,
+        err: Exception,
+    ) -> None:
+        """Retry notification setup after BlueZ reports a stale notify acquisition."""
+        if "Notify acquired" not in str(err):
             self.last_error = f"Could not enable {label} notifications: {err}"
             raise AC500CommunicationError(self.last_error) from err
 
+        with contextlib.suppress(Exception):
+            await self._client.stop_notify(characteristic_uuid)
+        await asyncio.sleep(0.5)
+        try:
+            await self._client.start_notify(
+                characteristic_uuid,
+                callback,
+                bluez={"use_start_notify": True},
+            )
+        except TypeError:
+            try:
+                await self._client.start_notify(characteristic_uuid, callback)
+            except Exception as fallback_err:
+                self.last_error = (
+                    f"Could not enable {label} notifications after retry: {fallback_err}"
+                )
+                raise AC500CommunicationError(self.last_error) from fallback_err
+        except Exception as retry_err:
+            self.last_error = (
+                f"Could not enable {label} notifications after retry: {retry_err}"
+            )
+            raise AC500CommunicationError(self.last_error) from retry_err
+
+        self._mark_notify_started(characteristic_uuid)
+
+    def _mark_notify_started(self, characteristic_uuid: str) -> None:
+        """Mark one notification subscription as active."""
         if characteristic_uuid == LIVE_DATA_CHAR_UUID:
             self._live_notify_started = True
         elif characteristic_uuid == ACK_CHAR_UUID:

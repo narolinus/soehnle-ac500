@@ -6,7 +6,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .client import AC500CommunicationError, AC500Device
 from .const import CONF_ADDRESS, CONF_NAME, SCAN_INTERVAL
@@ -41,7 +41,8 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
         try:
             return await self.device.async_update()
         except AC500CommunicationError as err:
-            raise UpdateFailed(str(err)) from err
+            _LOGGER.debug("Could not update %s: %s", self.name, err)
+            return self.data
 
     @callback
     def _async_device_updated(self) -> None:
@@ -50,7 +51,11 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
 
     async def async_pair(self) -> None:
         """Run the AC500 pair action."""
-        self.async_set_updated_data(await self.device.async_pair())
+        status = await self.device.async_pair()
+        if status is not None:
+            self.async_set_updated_data(status)
+        else:
+            self.async_update_listeners()
 
     async def async_reconnect(self) -> None:
         """Run the reconnect action."""
@@ -58,7 +63,7 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
 
     async def async_refresh(self) -> None:
         """Run an explicit refresh action."""
-        await self.async_request_refresh()
+        self.async_set_updated_data(await self.device.async_refresh())
 
     async def async_set_power(self, enabled: bool) -> None:
         """Set power."""

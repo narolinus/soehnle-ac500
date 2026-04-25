@@ -69,6 +69,9 @@
       "last_frame": {
         "name": "Last frame"
       },
+      "last_error": {
+        "name": "Last error"
+      },
       "state": {
         "name": "State"
       },
