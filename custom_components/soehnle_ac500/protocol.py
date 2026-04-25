@@ -4,15 +4,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .const import FAN_INDEX_TO_LEVEL, TIMER_VALUE_TO_OPTION
-
 DEVICE_NAME = "AC500"
+DISCOVERY_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
 WRITE_CHAR_UUID = "0000ef01-0000-1000-8000-00805f9b34fb"
 LIVE_DATA_CHAR_UUID = "0000ef02-0000-1000-8000-00805f9b34fb"
 ACK_CHAR_UUID = "0000ef03-0000-1000-8000-00805f9b34fb"
 HISTORY_CHAR_UUID = "0000ef04-0000-1000-8000-00805f9b34fb"
-DISCOVERY_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_ID = 0x07E0
+FRAME_LENGTH = 0x03
+
+FAN_INDEX_TO_LEVEL = {
+    0: "low",
+    1: "medium",
+    2: "high",
+    3: "turbo",
+}
+TIMER_VALUE_TO_OPTION = {
+    0: "off",
+    2: "2h",
+    4: "4h",
+    8: "8h",
+}
 
 POWER_COMMANDS = {
     "off": (0x01, 0x00, 0x00),
@@ -53,15 +65,15 @@ def frame_checksum(length: int, payload: bytes) -> int:
     return (length + sum(payload)) & 0xFF
 
 
-def build_frame(opcode: int, arg1: int = 0x00, arg2: int = 0x00, length: int = 0x03) -> bytes:
-    """Build a command frame."""
+def build_frame(opcode: int, arg1: int = 0x00, arg2: int = 0x00) -> bytes:
+    """Build a protocol frame."""
     payload = bytes([opcode, arg1, arg2])
-    checksum = frame_checksum(length, payload)
-    return bytes([0xAA, length, *payload, checksum, 0xEE])
+    checksum = frame_checksum(FRAME_LENGTH, payload)
+    return bytes([0xAA, FRAME_LENGTH, *payload, checksum, 0xEE])
 
 
 def validate_frame(frame: bytes) -> None:
-    """Validate a frame."""
+    """Validate one captured frame."""
     if len(frame) < 6:
         raise ValueError(f"Frame too short: {frame.hex()}")
     if frame[0] != 0xAA or frame[-1] != 0xEE:
@@ -84,7 +96,7 @@ def validate_frame(frame: bytes) -> None:
 
 @dataclass(slots=True, frozen=True)
 class AC500Status:
-    """Decoded AC500 live status."""
+    """Decoded live status."""
 
     frame_variant: int
     fan_raw: int
@@ -92,19 +104,18 @@ class AC500Status:
     timer_raw: int
     timer_label: str
     flags_raw: int
-    pm_raw: int | None
-    pm25_ug_m3: float | None
-    pm_known: bool
+    pm_raw: int
+    pm25_ug_m3: float
     temperature_raw: int
     temperature_c: float
     filter_raw: int
     filter_percent: float
     power_enabled: bool
     uv_enabled: bool
-    auto_enabled: bool
-    night_enabled: bool
     timer_enabled: bool
     buzzer_enabled: bool
+    auto_enabled: bool
+    night_enabled: bool
     raw_frame_hex: str
 
     @classmethod
@@ -114,22 +125,14 @@ class AC500Status:
         if frame[2] != 0xA0 or frame[3] not in (0x21, 0x22):
             raise ValueError(f"Unexpected live frame: {frame.hex()}")
 
+        fan_raw = frame[4]
+        timer_raw = frame[5]
+        flags_raw = frame[6]
+
         if frame[3] == 0x21:
-            fan_raw = frame[4]
-            timer_raw = frame[5]
-            flags_raw = frame[6]
             pm_raw = frame[8] | (frame[9] << 8)
-            pm25_ug_m3 = pm_raw / 10.0
-            pm_known = True
         else:
-            # Newer captures use A0 22 with PM2.5 moved to bytes 7-8 in
-            # big-endian order. Fan/timer/flags remain aligned with A0 21.
-            fan_raw = frame[4]
-            timer_raw = frame[5]
-            flags_raw = frame[6]
             pm_raw = (frame[7] << 8) | frame[8]
-            pm25_ug_m3 = pm_raw / 10.0
-            pm_known = True
 
         temperature_raw = frame[10]
         filter_raw = frame[12] | (frame[13] << 8)
@@ -142,8 +145,7 @@ class AC500Status:
             timer_label=TIMER_VALUE_TO_OPTION.get(timer_raw, f"unknown_{timer_raw}"),
             flags_raw=flags_raw,
             pm_raw=pm_raw,
-            pm25_ug_m3=pm25_ug_m3,
-            pm_known=pm_known,
+            pm25_ug_m3=pm_raw / 10.0,
             temperature_raw=temperature_raw,
             temperature_c=temperature_raw / 10.0,
             filter_raw=filter_raw,

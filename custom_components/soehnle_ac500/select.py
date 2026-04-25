@@ -37,7 +37,9 @@ class AC500TimerSelect(AC500Entity, SelectEntity):
     def current_option(self) -> str | None:
         """Return the active timer option."""
         status = self.coordinator.data.status
-        return None if status is None else status.timer_label
+        if status is None or status.timer_label not in TIMER_OPTIONS:
+            return None
+        return status.timer_label
 
     async def async_select_option(self, option: str) -> None:
         """Select a timer option."""

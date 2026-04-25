@@ -28,6 +28,7 @@ class AC500SensorDescription(SensorEntityDescription):
     """Description of an AC500 sensor."""
 
     value_fn: Callable[[AC500RuntimeState], Any] = lambda state: None
+    always_available: bool = False
 
 
 SENSORS: tuple[AC500SensorDescription, ...] = (
@@ -66,6 +67,15 @@ SENSORS: tuple[AC500SensorDescription, ...] = (
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        always_available=True,
+    ),
+    AC500SensorDescription(
+        key="session_state",
+        translation_key="session_state",
+        value_fn=lambda state: state.session_state,
+        icon="mdi:bluetooth-connect",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        always_available=True,
     ),
 )
 
@@ -91,6 +101,31 @@ class AC500SensorEntity(AC500Entity, SensorEntity):
         self.entity_description = description
 
     @property
+    def available(self) -> bool:
+        """Keep selected diagnostic sensors available."""
+        if self.entity_description.always_available:
+            return True
+        return super().available
+
+    @property
     def native_value(self):
         """Return the sensor value."""
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose extra diagnostics on the session-state sensor."""
+        if self.entity_description.key != "session_state":
+            return None
+
+        data = self.coordinator.data
+        status = data.status
+        return {
+            "address": data.address,
+            "connectable": data.connectable,
+            "paired": data.paired,
+            "control_mode_active": data.control_mode_active,
+            "last_error": data.last_error,
+            "last_seen": data.last_seen.isoformat() if data.last_seen else None,
+            "last_frame": status.raw_frame_hex if status else None,
+        }

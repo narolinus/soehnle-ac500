@@ -21,7 +21,7 @@
       },
       "confirm_bluetooth": {
         "title": "{name} einrichten",
-        "description": "Ein Soehnle AC500 wurde unter {address} erkannt. {details}. Fahre fort, um das Gerät zu Home Assistant hinzuzufügen. Die Integration verwaltet die Verbindung automatisch. Falls danach noch eine Kopplung nötig ist, nutze die Aktion Pair und drücke die Bluetooth-Taste am Gerät."
+        "description": "Ein Soehnle AC500 wurde unter {address} erkannt. {details}. Fahre fort, um das Gerät zu Home Assistant hinzuzufügen. Das Pairing ist danach über die Aktion Koppeln möglich, und Steuerbefehle öffnen den Control Mode nur kurzzeitig bei Bedarf."
       }
     },
     "error": {
@@ -37,9 +37,6 @@
       },
       "refresh": {
         "name": "Aktualisieren"
-      },
-      "reconnect": {
-        "name": "Neu verbinden"
       }
     },
     "fan": {
@@ -59,6 +56,9 @@
       },
       "rssi": {
         "name": "RSSI"
+      },
+      "session_state": {
+        "name": "Sitzungsstatus"
       }
     },
     "select": {

@@ -22,7 +22,7 @@ class AC500Entity(CoordinatorEntity[AC500Coordinator]):
 
     @property
     def available(self) -> bool:
-        """Return whether the entity is currently available."""
+        """Return whether the entity is available."""
         return self.coordinator.data.available
 
     @property

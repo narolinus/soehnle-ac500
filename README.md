@@ -12,16 +12,18 @@ Merkmale:
 
 - Bluetooth-Discovery fuer `AC500`
 - Einrichtung direkt aus Home Assistant heraus, ohne externes Skript
-- Pairing und AC500-Handshake direkt im Einrichtungsdialog
+- Pairing per `Pair`-Aktion direkt aus Home Assistant heraus
 - Hinzufuegen entweder ueber sichtbare Bluetooth-Geraete oder ueber manuelle Eingabe der MAC-Adresse
-- aktive BLE-Verbindung ueber Home Assistants Bluetooth-Abstraktion
+- aktive BLE-Verbindungen ueber Home Assistants Bluetooth-Abstraktion
 - funktioniert damit auch mit connectablen Bluetooth-Proxies wie ESPHome- oder Shelly-basierten Controllern
-- haelt pro Geraet moeglichst automatisch eine Control-Session offen und verbindet sich nach Abbruechen selbst neu
+- trennt sauber zwischen Status-Abruf und aktivem Control Mode:
+  - Status-Polls oeffnen nur kurz den Datenkanal und holen einen Live-Frame
+  - Steuerbefehle oeffnen nur fuer den jeweiligen Befehl den eigentlichen Control Mode
 - legt jeden Luftfilter als eigenes Geraet mit diesen Entitaeten an:
   - `fan`: Ein/Aus und Luefterstufe
   - `select`: Timer
   - `switch`: UV-C, Auto, Night, Buzzer
-  - `sensor`: PM2.5, Temperatur, Filterlebensdauer, RSSI
+  - `sensor`: PM2.5, Temperatur, Filterlebensdauer, RSSI, Session-Status
 
 ## Installation
 
@@ -47,13 +49,23 @@ Danach Home Assistant neu starten und die Integration ueber `Einstellungen -> Ge
 
 ## Einrichtung
 
-Beim Hinzufuegen fuehrt die Integration das erforderliche Pairing direkt selbst aus. Dazu den AC500 waehrend des Einrichtungsdialogs in den Pairing-Modus versetzen und die Bluetooth-Taste am Geraet druecken.
+Das Hinzufuegen legt zunaechst nur den Eintrag an. Falls fuer Schreibbefehle noch kein Bonding bzw. proprietaerer AC500-Handshake vorhanden ist, wird das danach ueber die `Pair`-Aktion gestartet. Dabei waehrend der laufenden Aktion die Bluetooth-Taste am Geraet druecken.
 
 Der Einrichtungsfluss unterstuetzt:
 
 - Auswahl bereits sichtbarer AC500-Geraete
 - manuelle Eingabe der Bluetooth-MAC-Adresse
 - automatische Bluetooth-Discovery fuer noch nicht eingerichtete sichtbare Geraete
+
+## Laufzeitverhalten
+
+Die Integration behandelt die beiden beobachteten BLE-Betriebsarten bewusst getrennt:
+
+- Status-Abruf: fuer regelmaessige Updates wird eine kurze BLE-Session aufgebaut, `AF 00 01` zur Initialisierung gesendet und danach mit `A2 00 03` ein Live-Status angefordert.
+- Control Mode: vor Steuerbefehlen wird eine eigene Control-Session mit zweimal `AF 00 01` aufgebaut. Nur in dieser Phase soll das Geraet Kommandos annehmen; das ist am AC500 an der dauerhaft leuchtenden LED erkennbar.
+- Pairing: die `Pair`-Aktion versucht zuerst normales BLE-Bonding und danach den proprietaeren `EF03`-Handshake (`A2 00 03` -> Ack `A2 00 02` -> `A2 00 01`).
+
+Dadurch bleibt die LED im Normalbetrieb nicht dauerhaft an, und trotzdem koennen Statusdaten sowie Steuerbefehle sauber ueber Home Assistants Bluetooth-Stack und Proxies abgewickelt werden.
 
 ## Entwicklung
 

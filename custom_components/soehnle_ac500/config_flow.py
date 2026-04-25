@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
@@ -14,10 +13,9 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import callback
 
 from .const import DEFAULT_NAME, DOMAIN
-from .coordinator import is_ac500_service_info
+from .protocol import DEVICE_NAME, DISCOVERY_SERVICE_UUID, MANUFACTURER_ID
 
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
-_LOGGER = logging.getLogger(__name__)
 
 
 def _normalize_address(address: str) -> str:
@@ -43,12 +41,26 @@ def _display_name(name: str, address: str) -> str:
     return f"{name} ({address[-8:]})"
 
 
+def _is_ac500_service_info(service_info: bluetooth.BluetoothServiceInfoBleak) -> bool:
+    """Return True if the advertisement looks like an AC500."""
+    name = (service_info.name or service_info.device.name or "").upper()
+    if name == DEVICE_NAME:
+        return True
+
+    service_uuids = {uuid.lower() for uuid in service_info.advertisement.service_uuids}
+    if DISCOVERY_SERVICE_UUID in service_uuids:
+        return True
+
+    return MANUFACTURER_ID in service_info.manufacturer_data
+
+
 def _discovered_ac500_devices(hass) -> dict[str, str]:
     """Return all currently discovered AC500 devices."""
     devices: dict[str, str] = {}
     for service_info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        if not is_ac500_service_info(service_info):
+        if not _is_ac500_service_info(service_info):
             continue
+
         address = _normalize_address(service_info.address)
         source = getattr(service_info, "source", None)
         source_text = f" via {source}" if source else ""
@@ -61,14 +73,7 @@ def _discovered_ac500_devices(hass) -> dict[str, str]:
 
 
 class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for the Soehnle AC500.
-
-    This config flow does NOT open a BLE connection to the device.
-    It only checks that the device is visible in the Bluetooth scanner
-    and creates the config entry.  The coordinator handles all BLE
-    operations once the entry is loaded. If the purifier still needs
-    onboarding, use the created Pair button afterwards.
-    """
+    """Handle a config flow for the Soehnle AC500."""
 
     VERSION = 1
 
@@ -103,8 +108,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             parts.append(f"RSSI: {self._rssi} dBm")
         return " | ".join(parts) if parts else "Scanner/RSSI unknown"
 
-    # ----- Auto-discovery via HA Bluetooth -----
-
     async def async_step_bluetooth(
         self,
         discovery_info: bluetooth.BluetoothServiceInfoBleak,
@@ -138,7 +141,6 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     ):
         """Confirm a discovered device and create the entry."""
         if user_input is not None:
-            # No BLE connection needed — just create the entry.
             return self._create_entry()
 
         return self.async_show_form(
@@ -151,10 +153,9 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
-    # ----- Manual setup -----
-
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle initial setup."""
+        del user_input
         return self.async_show_menu(
             step_id="user",
             menu_options=["scan", "manual"],
@@ -241,20 +242,8 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ----- Entry creation -----
-
     def _create_entry(self):
-        """Create the config entry without a BLE connection.
-
-        The coordinator will handle the connection lifecycle. If the purifier
-        still needs pairing, use the Pair button after setup and press the
-        purifier's Bluetooth button.
-        """
-        _LOGGER.info(
-            "AC500 %s: creating config entry — "
-            "the coordinator will handle connection and runtime control",
-            self._address,
-        )
+        """Create the config entry without opening a BLE connection."""
         return self.async_create_entry(
             title=self._discovered_name,
             data={

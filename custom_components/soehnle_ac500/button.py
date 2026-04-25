@@ -37,14 +37,7 @@ BUTTONS: tuple[AC500ButtonDescription, ...] = (
         translation_key="refresh",
         icon="mdi:refresh",
         entity_category=EntityCategory.DIAGNOSTIC,
-        press_fn=lambda coordinator: coordinator.async_request_refresh(),
-    ),
-    AC500ButtonDescription(
-        key="reconnect",
-        translation_key="reconnect",
-        icon="mdi:bluetooth-transfer",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        press_fn=lambda coordinator: coordinator.async_reconnect(),
+        press_fn=lambda coordinator: coordinator.async_refresh_status(),
     ),
 )
 
@@ -71,7 +64,7 @@ class AC500ButtonEntity(AC500Entity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        """Buttons must stay usable even if the live status path is currently down."""
+        """Keep buttons available for recovery actions."""
         return True
 
     async def async_press(self) -> None:

@@ -30,6 +30,7 @@ class AC500FanEntity(AC500Entity, FanEntity):
     """Expose the purifier as a fan."""
 
     _attr_name = None
+    _attr_translation_key = "fan"
     _attr_supported_features = (
         FanEntityFeature.SET_SPEED | FanEntityFeature.TURN_OFF | FanEntityFeature.TURN_ON
     )
@@ -51,6 +52,8 @@ class AC500FanEntity(AC500Entity, FanEntity):
         status = self.coordinator.data.status
         if status is None or not status.power_enabled:
             return 0
+        if status.fan_label not in FAN_LEVELS:
+            return None
         return ordered_list_item_to_percentage(FAN_LEVELS, status.fan_label)
 
     @property

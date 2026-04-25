@@ -11,11 +11,19 @@ MANUFACTURER = "Soehnle"
 MODEL = "Airclean Connect 500"
 DEFAULT_NAME = "AC500"
 
-CONF_RECONNECT_SECONDS = "reconnect_seconds"
-CONF_KEEPALIVE_SECONDS = "keepalive_seconds"
+UPDATE_INTERVAL = timedelta(seconds=30)
 
-DEFAULT_RECONNECT_SECONDS = 15
-DEFAULT_KEEPALIVE_SECONDS = 12
+CONNECT_TIMEOUT = 30.0
+PAIRING_TIMEOUT = 20.0
+STATUS_TIMEOUT = 3.0
+STATUS_WAIT_TIMEOUT = 5.0
+CONTROL_ENTER_DELAY = 0.1
+CONTROL_SETTLE_DELAY = 0.2
+
+SESSION_IDLE = "idle"
+SESSION_STATUS_POLL = "status_poll"
+SESSION_CONTROL = "control_mode"
+SESSION_PAIRING = "pairing"
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
@@ -26,16 +34,4 @@ PLATFORMS: list[Platform] = [
 ]
 
 FAN_LEVELS = ["low", "medium", "high", "turbo"]
-FAN_LEVEL_TO_INDEX = {level: index for index, level in enumerate(FAN_LEVELS)}
-FAN_INDEX_TO_LEVEL = {index: level for index, level in enumerate(FAN_LEVELS)}
-
 TIMER_OPTIONS = ["off", "2h", "4h", "8h"]
-TIMER_OPTION_TO_VALUE = {
-    "off": 0,
-    "2h": 2,
-    "4h": 4,
-    "8h": 8,
-}
-TIMER_VALUE_TO_OPTION = {value: option for option, value in TIMER_OPTION_TO_VALUE.items()}
-
-POLLING_FALLBACK = timedelta(seconds=30)
