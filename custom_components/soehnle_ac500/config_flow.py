@@ -6,9 +6,8 @@ import re
 from typing import Any
 
 from homeassistant.components import bluetooth
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
-from homeassistant.helpers.selector import SelectOptionDict, SelectSelector, SelectSelectorConfig
 import voluptuous as vol
 
 from .const import DEVICE_NAME, DOMAIN
@@ -43,7 +42,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bluetooth(
         self,
         discovery_info: bluetooth.BluetoothServiceInfoBleak,
-    ) -> ConfigFlowResult:
+    ) -> dict[str, Any]:
         """Handle Bluetooth discovery."""
         if not _is_ac500_name(discovery_info.name):
             return self.async_abort(reason="not_supported")
@@ -62,7 +61,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bluetooth_confirm(
         self,
         user_input: dict[str, Any] | None = None,
-    ) -> ConfigFlowResult:
+    ) -> dict[str, Any]:
         """Confirm a discovered AC500."""
         if user_input is not None and self._discovered_device is not None:
             address = _normalize_address(self._discovered_device.address)
@@ -86,7 +85,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self,
         user_input: dict[str, Any] | None = None,
-    ) -> ConfigFlowResult:
+    ) -> dict[str, Any]:
         """Handle manual setup."""
         errors: dict[str, str] = {}
 
@@ -112,19 +111,18 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             if _is_ac500_name(info.name)
         ]
-        options = [
-            SelectOptionDict(
-                value=_normalize_address(info.address),
-                label=f"{info.name or DEVICE_NAME} ({_normalize_address(info.address)})",
+        options = {
+            _normalize_address(info.address): (
+                f"{info.name or DEVICE_NAME} ({_normalize_address(info.address)})"
             )
             for info in discovered
-        ]
+        }
 
         schema_fields: dict[Any, Any] = {}
         if options:
             schema_fields[
-                vol.Required(CONF_ADDRESS, default=options[0]["value"])
-            ] = SelectSelector(SelectSelectorConfig(options=options, custom_value=True))
+                vol.Required(CONF_ADDRESS, default=next(iter(options)))
+            ] = vol.In(options)
         else:
             schema_fields[vol.Required(CONF_ADDRESS)] = str
         schema_fields[vol.Optional(CONF_NAME, default=DEVICE_NAME)] = str

@@ -2,29 +2,26 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from typing import TypeAlias
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import PLATFORMS
-from .coordinator import AC500Coordinator
 
-AC500ConfigEntry: TypeAlias = ConfigEntry[AC500Coordinator]
+if TYPE_CHECKING:
+    from .coordinator import AC500Coordinator
 
-# Load always-used platform modules at component import time. Home Assistant's
-# custom integration loader may otherwise report late platform imports during
-# config entry setup as blocking event-loop I/O.
-from . import binary_sensor as _binary_sensor  # noqa: E402,F401
-from . import button as _button  # noqa: E402,F401
-from . import select as _select  # noqa: E402,F401
-from . import sensor as _sensor  # noqa: E402,F401
-from . import switch as _switch  # noqa: E402,F401
-from . import text_sensor as _text_sensor  # noqa: E402,F401
+    AC500ConfigEntry: TypeAlias = ConfigEntry[AC500Coordinator]
+else:
+    AC500ConfigEntry: TypeAlias = ConfigEntry
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> bool:
     """Set up Soehnle AC500 from a config entry."""
+    from .coordinator import AC500Coordinator
+
     coordinator = AC500Coordinator(hass, entry)
     entry.runtime_data = coordinator
 
