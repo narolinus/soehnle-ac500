@@ -166,19 +166,18 @@ class AC500Device:
 
                 try:
                     await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
-                    return await self._initialize_session()
                 except AC500CommunicationError as err:
-                    # Pairing succeeded. Keep the connection and state so a later
-                    # Refresh can retry the live notification channel.
+                    # Pairing succeeded. Keep EF03 active and try the same status
+                    # request flow there; some BlueZ states keep EF02 acquired.
                     self.last_error = str(err)
                     self.state = STATE_PAIRED
                     _LOGGER.warning(
-                        "%s pair succeeded but live setup failed: %s",
+                        "%s pair succeeded but live setup failed, trying ack fallback: %s",
                         self.address,
                         err,
                     )
                     self._notify()
-                    return self.last_status
+                return await self._initialize_session()
             except AC500CommunicationError:
                 raise
             finally:
@@ -359,7 +358,7 @@ class AC500Device:
         )
         if self._is_connected:
             if notify_live:
-                await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
+                await self._start_status_notifications()
             if notify_ack:
                 await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
             return
@@ -388,12 +387,12 @@ class AC500Device:
                     self.address,
                     connectable=True,
                 ),
-                use_services_cache=True,
+                use_services_cache=False,
                 timeout=30.0 if pair_before_connect else SESSION_TIMEOUT,
                 pair=pair_before_connect,
             )
             if notify_live:
-                await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
+                await self._start_status_notifications()
             if notify_ack:
                 await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
         except (BleakError, TimeoutError, asyncio.TimeoutError, AC500CommunicationError) as err:
@@ -408,6 +407,19 @@ class AC500Device:
         self.state = STATE_CONNECTED
         _LOGGER.warning("%s connect done rssi=%s", self.address, self.rssi)
         self._notify()
+
+    async def _start_status_notifications(self) -> None:
+        """Start status notifications, falling back to EF03 if EF02 is locked."""
+        try:
+            await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
+        except AC500CommunicationError as err:
+            _LOGGER.warning(
+                "%s live notifications unavailable, trying ack status fallback: %s",
+                self.address,
+                err,
+            )
+            self.last_error = f"Live notifications unavailable, using ACK fallback: {err}"
+            await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
 
     async def _disconnect(self, *, force_state: bool = False) -> None:
         """Disconnect from the purifier."""
@@ -630,6 +642,15 @@ class AC500Device:
         """Handle EF03 notifications."""
         self.last_ack = bytes(data)
         _LOGGER.warning("%s RX ack %s", self.address, self.last_ack.hex())
+        try:
+            self.last_status = AC500Status.from_frame(self.last_ack)
+        except ValueError:
+            pass
+        else:
+            self._last_seen_status_counter += 1
+            self.state = STATE_STATUS_RECEIVED
+            self._live_event.set()
+
         if is_pair_ack(self.last_ack):
             self.state = STATE_PAIR_ACK
         self._ack_event.set()
