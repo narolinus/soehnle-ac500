@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from typing import TypeAlias
-
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from typing import Any
 
 from .const import PLATFORMS
 
-if TYPE_CHECKING:
-    from .coordinator import AC500Coordinator
 
-    AC500ConfigEntry: TypeAlias = ConfigEntry[AC500Coordinator]
-else:
-    AC500ConfigEntry: TypeAlias = ConfigEntry
-
-
-async def async_setup_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> bool:
+async def async_setup_entry(hass: Any, entry: Any) -> bool:
     """Set up Soehnle AC500 from a config entry."""
     from .coordinator import AC500Coordinator
 
@@ -34,9 +23,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> boo
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> bool:
+async def async_unload_entry(hass: Any, entry: Any) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        await entry.runtime_data.async_shutdown()
+        runtime_data: Any = entry.runtime_data
+        await runtime_data.async_shutdown()
     return unload_ok
