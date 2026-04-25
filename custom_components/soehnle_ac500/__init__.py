@@ -15,11 +15,6 @@ async def async_setup_entry(hass: Any, entry: Any) -> bool:
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_create_background_task(
-        hass,
-        coordinator.async_request_refresh(),
-        "soehnle_ac500_initial_refresh",
-    )
     return True
 
 
