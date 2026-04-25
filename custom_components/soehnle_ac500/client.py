@@ -103,6 +103,8 @@ class AC500Device:
         async with self._lock:
             paired = False
             try:
+                await self._disconnect(force_state=True)
+                await asyncio.sleep(1.0)
                 await self._connect(
                     notify_live=False,
                     notify_ack=True,
@@ -160,6 +162,9 @@ class AC500Device:
     async def async_connect_and_update(self) -> AC500Status | None:
         """Open a live session and keep it connected."""
         async with self._lock:
+            if self._is_connected and not self._live_notify_started:
+                await self._disconnect(force_state=True)
+                await asyncio.sleep(1.0)
             await self._connect(notify_live=True, notify_ack=False)
             status = await self._initialize_session()
             self.last_error = None
@@ -173,7 +178,7 @@ class AC500Device:
         """Disconnect and read status again."""
         async with self._lock:
             await self._disconnect(force_state=True)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             await self._connect(notify_live=True, notify_ack=False)
             return await self._initialize_session()
 
@@ -389,66 +394,10 @@ class AC500Device:
             label = characteristic_uuid
 
         try:
-            await self._client.start_notify(
-                characteristic_uuid,
-                callback,
-                bluez={"use_start_notify": True},
-            )
-        except TypeError as err:
-            try:
-                await self._client.start_notify(characteristic_uuid, callback)
-            except Exception as fallback_err:
-                err = fallback_err
-            else:
-                self._mark_notify_started(characteristic_uuid)
-                return
-
-            await self._retry_notify_after_error(characteristic_uuid, callback, label, err)
-            return
+            await self._client.start_notify(characteristic_uuid, callback)
         except Exception as err:
-            if "Notify acquired" not in str(err):
-                self.last_error = f"Could not enable {label} notifications: {err}"
-                raise AC500CommunicationError(self.last_error) from err
-
-            await self._retry_notify_after_error(characteristic_uuid, callback, label, err)
-            return
-
-        self._mark_notify_started(characteristic_uuid)
-
-    async def _retry_notify_after_error(
-        self,
-        characteristic_uuid: str,
-        callback: Callable[[BleakGATTCharacteristic, bytearray], None],
-        label: str,
-        err: Exception,
-    ) -> None:
-        """Retry notification setup after BlueZ reports a stale notify acquisition."""
-        if "Notify acquired" not in str(err):
             self.last_error = f"Could not enable {label} notifications: {err}"
             raise AC500CommunicationError(self.last_error) from err
-
-        with contextlib.suppress(Exception):
-            await self._client.stop_notify(characteristic_uuid)
-        await asyncio.sleep(0.5)
-        try:
-            await self._client.start_notify(
-                characteristic_uuid,
-                callback,
-                bluez={"use_start_notify": True},
-            )
-        except TypeError:
-            try:
-                await self._client.start_notify(characteristic_uuid, callback)
-            except Exception as fallback_err:
-                self.last_error = (
-                    f"Could not enable {label} notifications after retry: {fallback_err}"
-                )
-                raise AC500CommunicationError(self.last_error) from fallback_err
-        except Exception as retry_err:
-            self.last_error = (
-                f"Could not enable {label} notifications after retry: {retry_err}"
-            )
-            raise AC500CommunicationError(self.last_error) from retry_err
 
         self._mark_notify_started(characteristic_uuid)
 
