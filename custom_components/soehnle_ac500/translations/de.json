@@ -1,83 +1,92 @@
 {
   "config": {
     "step": {
+      "bluetooth_confirm": {
+        "title": "Soehnle AC500 hinzufügen",
+        "description": "Den gefundenen Soehnle AC500 unter {address} einrichten."
+      },
       "user": {
         "title": "Soehnle AC500 hinzufügen",
-        "description": "Wähle, ob du einen sichtbaren AC500 auswählen oder seine Bluetooth-MAC-Adresse manuell eingeben möchtest."
-      },
-      "scan": {
-        "title": "Sichtbare AC500-Geräte",
-        "description": "Wähle einen AC500-Luftfilter aus, der aktuell über Home Assistant Bluetooth sichtbar ist.",
+        "description": "Einen gefundenen AC500 auswählen oder die Bluetooth-MAC-Adresse eingeben.",
         "data": {
-          "address": "Sichtbares Gerät"
+          "address": "Bluetooth-Adresse",
+          "name": "Name"
         }
-      },
-      "manual": {
-        "title": "Bluetooth-MAC-Adresse eingeben",
-        "description": "Gib die Bluetooth-MAC-Adresse des AC500 ein, den du einrichten möchtest.",
-        "data": {
-          "address": "Bluetooth-Adresse"
-        }
-      },
-      "confirm_bluetooth": {
-        "title": "{name} einrichten",
-        "description": "Ein Soehnle AC500 wurde unter {address} erkannt. {details}. Fahre fort, um das Gerät zu Home Assistant hinzuzufügen. Das Pairing ist danach über die Aktion Koppeln möglich, und Steuerbefehle öffnen den Control Mode nur kurzzeitig bei Bedarf."
       }
     },
     "error": {
-      "invalid_mac": "Bitte eine gültige Bluetooth-MAC-Adresse im Format AA:BB:CC:DD:EE:FF eingeben.",
-      "no_bluetooth_scanner": "Home Assistant hat aktuell keinen verbindungsfähigen Bluetooth-Adapter oder Proxy verfügbar.",
-      "no_devices_found": "Aktuell sind keine sichtbaren AC500-Geräte verfügbar."
+      "invalid_address": "Bitte eine Bluetooth-MAC-Adresse wie AA:BB:CC:DD:EE:FF eingeben."
+    },
+    "abort": {
+      "already_configured": "Dieser AC500 ist bereits eingerichtet.",
+      "not_supported": "Das gefundene Bluetooth-Gerät ist kein Soehnle AC500."
     }
   },
   "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Verbunden"
+      }
+    },
     "button": {
       "pair": {
-        "name": "Koppeln"
+        "name": "Pair"
       },
       "refresh": {
         "name": "Aktualisieren"
-      }
-    },
-    "fan": {
-      "fan": {
-        "name": "Luftreiniger"
-      }
-    },
-    "sensor": {
-      "pm25": {
-        "name": "PM2,5"
       },
-      "temperature": {
-        "name": "Temperatur"
-      },
-      "filter_life": {
-        "name": "Filterlebensdauer"
-      },
-      "rssi": {
-        "name": "RSSI"
-      },
-      "session_state": {
-        "name": "Sitzungsstatus"
+      "reconnect": {
+        "name": "Neu verbinden"
       }
     },
     "select": {
+      "fan_mode": {
+        "name": "Lüftermodus"
+      },
       "timer": {
         "name": "Timer"
       }
     },
+    "sensor": {
+      "filter": {
+        "name": "Filter"
+      },
+      "pm25": {
+        "name": "PM2.5"
+      },
+      "rssi": {
+        "name": "RSSI"
+      },
+      "temperature": {
+        "name": "Temperatur"
+      }
+    },
     "switch": {
-      "uv": {
-        "name": "UV-C"
-      },
       "auto": {
-        "name": "Automatik"
-      },
-      "night": {
-        "name": "Nachtmodus"
+        "name": "Auto"
       },
       "buzzer": {
-        "name": "Summer"
+        "name": "Buzzer"
+      },
+      "night": {
+        "name": "Nacht"
+      },
+      "power": {
+        "name": "Power"
+      },
+      "uv": {
+        "name": "UV-C"
+      }
+    },
+    "text_sensor": {
+      "last_ack": {
+        "name": "Letztes Ack"
+      },
+      "last_frame": {
+        "name": "Letzter Frame"
+      },
+      "state": {
+        "name": "Status"
       }
     }
   }

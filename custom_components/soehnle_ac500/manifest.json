@@ -1,37 +1,18 @@
 {
   "domain": "soehnle_ac500",
-  "name": "Soehnle AC500",
+  "name": "Soehnle Airclean Connect 500",
   "bluetooth": [
     {
-      "local_name": "AC500",
-      "connectable": true
-    },
-    {
-      "service_uuid": "0000ffa0-0000-1000-8000-00805f9b34fb",
-      "connectable": true
-    },
-    {
-      "manufacturer_id": 2016,
-      "connectable": true
+      "connectable": true,
+      "local_name": "AC500"
     }
   ],
-  "codeowners": [
-    "@narolinus"
-  ],
+  "codeowners": ["@narolinus"],
   "config_flow": true,
-  "dependencies": [
-    "bluetooth"
-  ],
-  "documentation": "https://github.com/narolinus/soehnle-ac500#readme",
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/narolinus/soehnle-ac500",
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/narolinus/soehnle-ac500/issues",
-  "loggers": [
-    "bleak_retry_connector",
-    "custom_components.soehnle_ac500"
-  ],
-  "requirements": [
-    "bleak-retry-connector>=4.0.0"
-  ],
-  "version": "0.2.0"
+  "version": "0.1.0"
 }

@@ -1,8 +1,9 @@
-"""Shared entity helpers for the Soehnle AC500 integration."""
+"""Base entity for Soehnle AC500."""
 
 from __future__ import annotations
 
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.const import CONF_ADDRESS, CONF_NAME
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
@@ -10,27 +11,20 @@ from .coordinator import AC500Coordinator
 
 
 class AC500Entity(CoordinatorEntity[AC500Coordinator]):
-    """Base entity for an AC500."""
+    """Base entity for one AC500 device."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
 
     def __init__(self, coordinator: AC500Coordinator, key: str) -> None:
         """Initialize the entity."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.address.lower()}_{key}"
-
-    @property
-    def available(self) -> bool:
-        """Return whether the entity is available."""
-        return self.coordinator.data.available
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return device metadata."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, self.coordinator.address)},
+        self._key = key
+        address = coordinator.config_entry.data[CONF_ADDRESS]
+        self._attr_unique_id = f"{address}_{key}"
+        self._attr_device_info = DeviceInfo(
+            connections={(CONNECTION_BLUETOOTH, address)},
+            identifiers={(DOMAIN, address)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name=self.coordinator.data.name,
+            name=coordinator.config_entry.data.get(CONF_NAME, coordinator.config_entry.title),
         )

@@ -4,34 +4,43 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from homeassistant.const import Platform
-
 DOMAIN = "soehnle_ac500"
+
 MANUFACTURER = "Soehnle"
 MODEL = "Airclean Connect 500"
-DEFAULT_NAME = "AC500"
+DEVICE_NAME = "AC500"
 
-UPDATE_INTERVAL = timedelta(seconds=30)
+SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
+WRITE_CHAR_UUID = "0000ef01-0000-1000-8000-00805f9b34fb"
+LIVE_DATA_CHAR_UUID = "0000ef02-0000-1000-8000-00805f9b34fb"
+ACK_CHAR_UUID = "0000ef03-0000-1000-8000-00805f9b34fb"
+HISTORY_CHAR_UUID = "0000ef04-0000-1000-8000-00805f9b34fb"
 
-CONNECT_TIMEOUT = 30.0
-PAIRING_TIMEOUT = 20.0
+SCAN_INTERVAL = timedelta(seconds=30)
+SESSION_TIMEOUT = 10.0
+PAIR_TIMEOUT = 20.0
 STATUS_TIMEOUT = 3.0
-STATUS_WAIT_TIMEOUT = 5.0
-CONTROL_ENTER_DELAY = 0.1
-CONTROL_SETTLE_DELAY = 0.2
+COMMAND_TIMEOUT = 5.0
 
-SESSION_IDLE = "idle"
-SESSION_STATUS_POLL = "status_poll"
-SESSION_CONTROL = "control_mode"
-SESSION_PAIRING = "pairing"
+CONF_ADDRESS = "address"
+CONF_NAME = "name"
 
-PLATFORMS: list[Platform] = [
-    Platform.BUTTON,
-    Platform.FAN,
-    Platform.SELECT,
-    Platform.SENSOR,
-    Platform.SWITCH,
+PLATFORMS = [
+    "binary_sensor",
+    "button",
+    "select",
+    "sensor",
+    "switch",
+    "text_sensor",
 ]
 
-FAN_LEVELS = ["low", "medium", "high", "turbo"]
-TIMER_OPTIONS = ["off", "2h", "4h", "8h"]
+STATE_DISCONNECTED = "disconnected"
+STATE_CONNECTED = "connected"
+STATE_STATUS_RECEIVED = "status_received"
+STATE_PAIRING = "pairing"
+STATE_PAIR_ACK = "pair_ack"
+STATE_PAIRED = "paired"
+STATE_PAIR_TIMEOUT = "pair_timeout"
+STATE_COMMAND_SENT = "command_sent"
+STATE_COMMAND_TIMEOUT = "command_timeout"
+STATE_PARSE_FAILED = "live_parse_failed"

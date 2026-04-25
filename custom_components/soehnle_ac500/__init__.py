@@ -1,36 +1,35 @@
-"""The Soehnle AC500 integration."""
+"""Soehnle Airclean Connect 500 integration."""
 
 from __future__ import annotations
+
+from typing import TypeAlias
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, PLATFORMS
+from .const import PLATFORMS
 from .coordinator import AC500Coordinator
 
-
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the integration from YAML."""
-    del hass, config
-    return True
+AC500ConfigEntry: TypeAlias = ConfigEntry[AC500Coordinator]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> bool:
     """Set up Soehnle AC500 from a config entry."""
     coordinator = AC500Coordinator(hass, entry)
-    await coordinator.async_start()
+    entry.runtime_data = coordinator
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_create_background_task(
+        hass,
+        coordinator.async_request_refresh(),
+        "soehnle_ac500_initial_refresh",
+    )
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if not unload_ok:
-        return False
-
-    coordinator: AC500Coordinator = hass.data[DOMAIN].pop(entry.entry_id)
-    await coordinator.async_stop()
-    return True
+    if unload_ok:
+        await entry.runtime_data.async_shutdown()
+    return unload_ok

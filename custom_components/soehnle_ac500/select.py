@@ -1,46 +1,85 @@
-"""Select platform for the Soehnle AC500."""
+"""Select entities for Soehnle AC500."""
 
 from __future__ import annotations
 
-from homeassistant.components.select import SelectEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
-from .const import DOMAIN, TIMER_OPTIONS
+from homeassistant.components.select import SelectEntity
+from homeassistant.exceptions import HomeAssistantError
+
+from . import AC500ConfigEntry
+from .client import AC500CommunicationError
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
+from .protocol import FAN_LABELS, TIMER_LABELS, AC500Status
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
-) -> None:
-    """Set up AC500 selects."""
-    coordinator: AC500Coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([AC500TimerSelect(coordinator)])
+@dataclass(frozen=True, slots=True)
+class AC500SelectDescription:
+    """Describe an AC500 select."""
+
+    key: str
+    translation_key: str
+    icon: str
+    options: list[str]
+    value_fn: Callable[[AC500Status], str | None]
+    set_fn: Callable[[AC500Coordinator, str], Awaitable[None]]
 
 
-class AC500TimerSelect(AC500Entity, SelectEntity):
-    """Expose the timer as a select entity."""
+SELECTS = (
+    AC500SelectDescription(
+        key="fan_mode",
+        translation_key="fan_mode",
+        icon="mdi:fan",
+        options=list(FAN_LABELS.values()),
+        value_fn=lambda status: status.fan_label,
+        set_fn=lambda coordinator, option: coordinator.async_set_fan_mode(option),
+    ),
+    AC500SelectDescription(
+        key="timer",
+        translation_key="timer",
+        icon="mdi:timer-outline",
+        options=list(TIMER_LABELS.values()),
+        value_fn=lambda status: status.timer_label,
+        set_fn=lambda coordinator, option: coordinator.async_set_timer(option),
+    ),
+)
 
-    _attr_translation_key = "timer"
-    _attr_icon = "mdi:timer-outline"
-    _attr_options = TIMER_OPTIONS
 
-    def __init__(self, coordinator: AC500Coordinator) -> None:
-        """Initialize the timer select."""
-        super().__init__(coordinator, "timer")
+async def async_setup_entry(entry_hass, entry: AC500ConfigEntry, async_add_entities) -> None:
+    """Set up selects."""
+    coordinator = entry.runtime_data
+    async_add_entities(AC500Select(coordinator, description) for description in SELECTS)
+
+
+class AC500Select(AC500Entity, SelectEntity):
+    """Soehnle AC500 select."""
+
+    entity_description: AC500SelectDescription
+
+    def __init__(
+        self,
+        coordinator: AC500Coordinator,
+        description: AC500SelectDescription,
+    ) -> None:
+        """Initialize select."""
+        super().__init__(coordinator, description.key)
+        self.entity_description = description
+        self._attr_translation_key = description.translation_key
+        self._attr_icon = description.icon
+        self._attr_options = description.options
 
     @property
     def current_option(self) -> str | None:
-        """Return the active timer option."""
-        status = self.coordinator.data.status
-        if status is None or status.timer_label not in TIMER_OPTIONS:
+        """Return the selected option."""
+        if self.coordinator.data is None:
             return None
-        return status.timer_label
+        return self.entity_description.value_fn(self.coordinator.data)
 
     async def async_select_option(self, option: str) -> None:
-        """Select a timer option."""
-        await self.coordinator.async_set_timer(option)
+        """Select an option."""
+        try:
+            await self.entity_description.set_fn(self.coordinator, option)
+        except AC500CommunicationError as err:
+            raise HomeAssistantError(str(err)) from err

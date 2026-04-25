@@ -1,62 +1,49 @@
-"""Protocol helpers for the Soehnle AC500."""
+"""Protocol helpers for the Soehnle Airclean Connect 500."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-DEVICE_NAME = "AC500"
-DISCOVERY_SERVICE_UUID = "0000ffa0-0000-1000-8000-00805f9b34fb"
-WRITE_CHAR_UUID = "0000ef01-0000-1000-8000-00805f9b34fb"
-LIVE_DATA_CHAR_UUID = "0000ef02-0000-1000-8000-00805f9b34fb"
-ACK_CHAR_UUID = "0000ef03-0000-1000-8000-00805f9b34fb"
-HISTORY_CHAR_UUID = "0000ef04-0000-1000-8000-00805f9b34fb"
-MANUFACTURER_ID = 0x07E0
+FRAME_START = 0xAA
+FRAME_END = 0xEE
 FRAME_LENGTH = 0x03
+FILTER_RAW_FULL_SCALE = 4320.0
 
-FAN_INDEX_TO_LEVEL = {
-    0: "low",
-    1: "medium",
-    2: "high",
-    3: "turbo",
+FAN_LABELS = {
+    0: "Low",
+    1: "Medium",
+    2: "High",
+    3: "Turbo",
 }
-TIMER_VALUE_TO_OPTION = {
-    0: "off",
-    2: "2h",
-    4: "4h",
-    8: "8h",
+FAN_VALUES = {label: raw for raw, label in FAN_LABELS.items()}
+
+TIMER_LABELS = {
+    0: "Off",
+    2: "2 h",
+    4: "4 h",
+    8: "8 h",
 }
+TIMER_VALUES = {label: raw for raw, label in TIMER_LABELS.items()}
 
 POWER_COMMANDS = {
-    "off": (0x01, 0x00, 0x00),
-    "on": (0x01, 0x00, 0x01),
-}
-FAN_COMMANDS = {
-    "low": (0x02, 0x00, 0x00),
-    "medium": (0x02, 0x00, 0x01),
-    "high": (0x02, 0x00, 0x02),
-    "turbo": (0x02, 0x00, 0x03),
+    False: (0x01, 0x00, 0x00),
+    True: (0x01, 0x00, 0x01),
 }
 UV_COMMANDS = {
-    "off": (0x03, 0x00, 0x00),
-    "on": (0x03, 0x00, 0x01),
-}
-TIMER_COMMANDS = {
-    "off": (0x04, 0x00, 0x00),
-    "2h": (0x04, 0x00, 0x02),
-    "4h": (0x04, 0x00, 0x04),
-    "8h": (0x04, 0x00, 0x08),
+    False: (0x03, 0x00, 0x00),
+    True: (0x03, 0x00, 0x01),
 }
 AUTO_COMMANDS = {
-    "off": (0x05, 0x00, 0x00),
-    "on": (0x05, 0x00, 0x01),
+    False: (0x05, 0x00, 0x00),
+    True: (0x05, 0x00, 0x01),
 }
 NIGHT_COMMANDS = {
-    "off": (0x06, 0x00, 0x00),
-    "on": (0x06, 0x00, 0x01),
+    False: (0x06, 0x00, 0x00),
+    True: (0x06, 0x00, 0x01),
 }
 BUZZER_COMMANDS = {
-    "off": (0x08, 0x00, 0x00),
-    "on": (0x08, 0x00, 0x01),
+    False: (0x08, 0x00, 0x00),
+    True: (0x08, 0x00, 0x01),
 }
 
 
@@ -66,17 +53,24 @@ def frame_checksum(length: int, payload: bytes) -> int:
 
 
 def build_frame(opcode: int, arg1: int = 0x00, arg2: int = 0x00) -> bytes:
-    """Build a protocol frame."""
+    """Build a write frame."""
     payload = bytes([opcode, arg1, arg2])
-    checksum = frame_checksum(FRAME_LENGTH, payload)
-    return bytes([0xAA, FRAME_LENGTH, *payload, checksum, 0xEE])
+    return bytes(
+        [
+            FRAME_START,
+            FRAME_LENGTH,
+            *payload,
+            frame_checksum(FRAME_LENGTH, payload),
+            FRAME_END,
+        ]
+    )
 
 
 def validate_frame(frame: bytes) -> None:
-    """Validate one captured frame."""
+    """Validate a received AC500 frame."""
     if len(frame) < 6:
         raise ValueError(f"Frame too short: {frame.hex()}")
-    if frame[0] != 0xAA or frame[-1] != 0xEE:
+    if frame[0] != FRAME_START or frame[-1] != FRAME_END:
         raise ValueError(f"Invalid frame markers: {frame.hex()}")
 
     length = frame[1]
@@ -90,32 +84,33 @@ def validate_frame(frame: bytes) -> None:
     expected = frame_checksum(length, payload)
     if checksum != expected:
         raise ValueError(
-            f"Checksum mismatch in frame {frame.hex()}: expected 0x{expected:02x}, got 0x{checksum:02x}"
+            f"Checksum mismatch in frame {frame.hex()}: "
+            f"expected 0x{expected:02x}, got 0x{checksum:02x}"
         )
+
+
+def is_pair_ack(frame: bytes) -> bool:
+    """Return true if an EF03 notification is the observed pairing ack."""
+    return frame == build_frame(0xA2, 0x00, 0x02)
 
 
 @dataclass(slots=True, frozen=True)
 class AC500Status:
-    """Decoded live status."""
+    """Decoded live status from an AC500 notification."""
 
     frame_variant: int
     fan_raw: int
-    fan_label: str
     timer_raw: int
-    timer_label: str
     flags_raw: int
+    reserved_raw: int
     pm_raw: int
     pm25_ug_m3: float
     temperature_raw: int
     temperature_c: float
+    temperature_aux_raw: int
     filter_raw: int
+    filter_aux_raw: int
     filter_percent: float
-    power_enabled: bool
-    uv_enabled: bool
-    timer_enabled: bool
-    buzzer_enabled: bool
-    auto_enabled: bool
-    night_enabled: bool
     raw_frame_hex: str
 
     @classmethod
@@ -123,16 +118,18 @@ class AC500Status:
         """Decode a live status frame."""
         validate_frame(frame)
         if frame[2] != 0xA0 or frame[3] not in (0x21, 0x22):
-            raise ValueError(f"Unexpected live frame: {frame.hex()}")
+            raise ValueError(f"Unexpected live-data frame: {frame.hex()}")
 
         fan_raw = frame[4]
         timer_raw = frame[5]
         flags_raw = frame[6]
 
         if frame[3] == 0x21:
+            reserved_raw = frame[7]
             pm_raw = frame[8] | (frame[9] << 8)
         else:
             pm_raw = (frame[7] << 8) | frame[8]
+            reserved_raw = frame[9]
 
         temperature_raw = frame[10]
         filter_raw = frame[12] | (frame[13] << 8)
@@ -140,21 +137,56 @@ class AC500Status:
         return cls(
             frame_variant=frame[3],
             fan_raw=fan_raw,
-            fan_label=FAN_INDEX_TO_LEVEL.get(fan_raw, f"unknown_{fan_raw}"),
             timer_raw=timer_raw,
-            timer_label=TIMER_VALUE_TO_OPTION.get(timer_raw, f"unknown_{timer_raw}"),
             flags_raw=flags_raw,
+            reserved_raw=reserved_raw,
             pm_raw=pm_raw,
             pm25_ug_m3=pm_raw / 10.0,
             temperature_raw=temperature_raw,
             temperature_c=temperature_raw / 10.0,
+            temperature_aux_raw=frame[11],
             filter_raw=filter_raw,
-            filter_percent=(filter_raw / 4320.0) * 100.0,
-            power_enabled=bool(flags_raw & 0x01),
-            uv_enabled=bool(flags_raw & 0x02),
-            timer_enabled=bool(flags_raw & 0x04),
-            buzzer_enabled=bool(flags_raw & 0x08),
-            auto_enabled=bool(flags_raw & 0x20),
-            night_enabled=bool(flags_raw & 0x40),
+            filter_aux_raw=frame[14],
+            filter_percent=(filter_raw / FILTER_RAW_FULL_SCALE) * 100.0,
             raw_frame_hex=frame.hex(),
         )
+
+    @property
+    def fan_label(self) -> str | None:
+        """Return the current fan label."""
+        return FAN_LABELS.get(self.fan_raw)
+
+    @property
+    def timer_label(self) -> str | None:
+        """Return the current timer label."""
+        return TIMER_LABELS.get(self.timer_raw)
+
+    @property
+    def power_enabled(self) -> bool:
+        """Return true if the purifier is powered on."""
+        return bool(self.flags_raw & 0x01)
+
+    @property
+    def uv_enabled(self) -> bool:
+        """Return true if UV-C is enabled."""
+        return bool(self.flags_raw & 0x02)
+
+    @property
+    def timer_enabled(self) -> bool:
+        """Return true if the timer is active."""
+        return bool(self.flags_raw & 0x04)
+
+    @property
+    def buzzer_enabled(self) -> bool:
+        """Return true if the buzzer is enabled."""
+        return bool(self.flags_raw & 0x08)
+
+    @property
+    def auto_enabled(self) -> bool:
+        """Return true if automatic mode is enabled."""
+        return bool(self.flags_raw & 0x20)
+
+    @property
+    def night_enabled(self) -> bool:
+        """Return true if night mode is enabled."""
+        return bool(self.flags_raw & 0x40)
