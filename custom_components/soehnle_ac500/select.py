@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.exceptions import HomeAssistantError
 
-from . import AC500ConfigEntry
 from .client import AC500CommunicationError
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
@@ -47,7 +47,7 @@ SELECTS = (
 )
 
 
-async def async_setup_entry(entry_hass, entry: AC500ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(entry_hass, entry: Any, async_add_entities) -> None:
     """Set up selects."""
     coordinator = entry.runtime_data
     async_add_entities(AC500Select(coordinator, description) for description in SELECTS)

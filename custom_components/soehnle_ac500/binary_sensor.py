@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.const import EntityCategory
 
-from . import AC500ConfigEntry
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
 
 
-async def async_setup_entry(entry_hass, entry: AC500ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(entry_hass, entry: Any, async_add_entities) -> None:
     """Set up binary sensors."""
     async_add_entities([AC500ConnectedBinarySensor(entry.runtime_data)])
 

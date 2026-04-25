@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -17,7 +18,6 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 
-from . import AC500ConfigEntry
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
 from .protocol import AC500Status
@@ -102,7 +102,7 @@ SENSORS = (
 )
 
 
-async def async_setup_entry(entry_hass, entry: AC500ConfigEntry, async_add_entities) -> None:
+async def async_setup_entry(entry_hass, entry: Any, async_add_entities) -> None:
     """Set up sensors."""
     coordinator = entry.runtime_data
     async_add_entities(AC500Sensor(coordinator, description) for description in SENSORS)
