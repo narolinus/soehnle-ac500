@@ -99,6 +99,36 @@ SENSORS = (
         suggested_display_precision=0,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
+    AC500SensorDescription(
+        key="state",
+        translation_key="state",
+        icon="mdi:information-outline",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        value_fn=lambda coordinator: coordinator.device.state,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    AC500SensorDescription(
+        key="last_frame",
+        translation_key="last_frame",
+        icon="mdi:code-braces",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        value_fn=lambda coordinator: coordinator.device.last_frame_hex,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    AC500SensorDescription(
+        key="last_ack",
+        translation_key="last_ack",
+        icon="mdi:code-brackets",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        value_fn=lambda coordinator: coordinator.device.last_ack_hex,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
 )
 
 

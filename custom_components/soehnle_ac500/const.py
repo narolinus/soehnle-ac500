@@ -31,7 +31,6 @@ PLATFORMS = [
     "select",
     "sensor",
     "switch",
-    "text_sensor",
 ]
 
 STATE_DISCONNECTED = "disconnected"

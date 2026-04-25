@@ -63,6 +63,15 @@
       "rssi": {
         "name": "RSSI"
       },
+      "last_ack": {
+        "name": "Letztes Ack"
+      },
+      "last_frame": {
+        "name": "Letzter Frame"
+      },
+      "state": {
+        "name": "Status"
+      },
       "temperature": {
         "name": "Temperatur"
       }
@@ -82,17 +91,6 @@
       },
       "uv": {
         "name": "UV-C"
-      }
-    },
-    "text_sensor": {
-      "last_ack": {
-        "name": "Letztes Ack"
-      },
-      "last_frame": {
-        "name": "Letzter Frame"
-      },
-      "state": {
-        "name": "Status"
       }
     }
   }
