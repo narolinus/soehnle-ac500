@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
@@ -13,6 +14,8 @@ from homeassistant.exceptions import HomeAssistantError
 from .client import AC500CommunicationError
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -71,7 +74,17 @@ class AC500Button(AC500Entity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Press the button."""
+        _LOGGER.warning(
+            "AC500 action requested: %s for %s",
+            self.entity_description.key,
+            self.coordinator.device.address,
+        )
         try:
             await self.entity_description.press_fn(self.coordinator)
         except AC500CommunicationError as err:
+            _LOGGER.exception(
+                "AC500 action failed: %s for %s",
+                self.entity_description.key,
+                self.coordinator.device.address,
+            )
             raise HomeAssistantError(str(err)) from err

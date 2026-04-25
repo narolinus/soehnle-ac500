@@ -89,10 +89,23 @@ class AC500Device:
         """Fetch a fresh status frame in a short BLE session."""
         async with self._lock:
             opened_here = not self._is_connected
+            _LOGGER.warning(
+                "%s refresh session start opened_here=%s connected=%s live_notify=%s ack_notify=%s",
+                self.address,
+                opened_here,
+                self._is_connected,
+                self._live_notify_started,
+                self._ack_notify_started,
+            )
             try:
                 await self._connect(notify_live=True, notify_ack=False)
                 status = await self._initialize_session()
                 self.last_error = None
+                _LOGGER.warning(
+                    "%s refresh session done status=%s",
+                    self.address,
+                    status.raw_frame_hex if status else None,
+                )
                 return status
             finally:
                 if opened_here:
@@ -102,6 +115,13 @@ class AC500Device:
         """Run BLE pairing, then the observed proprietary AC500 handshake."""
         async with self._lock:
             paired = False
+            _LOGGER.warning(
+                "%s pair session start connected=%s live_notify=%s ack_notify=%s",
+                self.address,
+                self._is_connected,
+                self._live_notify_started,
+                self._ack_notify_started,
+            )
             try:
                 await self._disconnect(force_state=True)
                 await asyncio.sleep(1.0)
@@ -124,6 +144,12 @@ class AC500Device:
                 await self._write_command(0xA2, 0x00, 0x03)
 
                 ack = await self._wait_for_ack(lambda data: data == expected, PAIR_TIMEOUT)
+                _LOGGER.warning(
+                    "%s pair ack result=%s expected=%s",
+                    self.address,
+                    ack.hex() if ack else None,
+                    expected.hex(),
+                )
                 if ack != expected:
                     self.state = STATE_PAIR_TIMEOUT
                     self._notify()
@@ -146,6 +172,11 @@ class AC500Device:
                     # Refresh can retry the live notification channel.
                     self.last_error = str(err)
                     self.state = STATE_PAIRED
+                    _LOGGER.warning(
+                        "%s pair succeeded but live setup failed: %s",
+                        self.address,
+                        err,
+                    )
                     self._notify()
                     return self.last_status
             except AC500CommunicationError:
@@ -223,6 +254,13 @@ class AC500Device:
 
         async with self._lock:
             opened_here = not self._is_connected
+            _LOGGER.warning(
+                "%s fan command start mode=%s opened_here=%s connected=%s",
+                self.address,
+                mode,
+                opened_here,
+                self._is_connected,
+            )
             try:
                 await self._connect(notify_live=True, notify_ack=False)
                 await self._enter_control_mode()
@@ -277,6 +315,15 @@ class AC500Device:
         """Run one control-mode command and refresh status."""
         async with self._lock:
             opened_here = not self._is_connected
+            _LOGGER.warning(
+                "%s command start opcode=0x%02x arg1=0x%02x arg2=0x%02x opened_here=%s connected=%s",
+                self.address,
+                opcode,
+                arg1,
+                arg2,
+                opened_here,
+                self._is_connected,
+            )
             try:
                 await self._connect(notify_live=True, notify_ack=False)
                 await self._enter_control_mode()
@@ -302,6 +349,14 @@ class AC500Device:
         pair_before_connect: bool = False,
     ) -> None:
         """Open a BLE connection and subscribe to the requested notifications."""
+        _LOGGER.warning(
+            "%s connect requested notify_live=%s notify_ack=%s pair_before_connect=%s connected=%s",
+            self.address,
+            notify_live,
+            notify_ack,
+            pair_before_connect,
+            self._is_connected,
+        )
         if self._is_connected:
             if notify_live:
                 await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
@@ -315,6 +370,7 @@ class AC500Device:
             connectable=True,
         )
         if ble_device is None:
+            _LOGGER.warning("%s no connectable bluetooth device found in HA cache", self.address)
             raise AC500CommunicationError(
                 f"{self.name} is not currently visible to Home Assistant Bluetooth"
             )
@@ -344,15 +400,25 @@ class AC500Device:
             self.last_error = str(err)
             self.state = STATE_DISCONNECTED
             self.connected = False
+            _LOGGER.exception("%s connect failed: %s", self.address, err)
             self._notify()
             raise AC500CommunicationError(str(err)) from err
 
         self.connected = True
         self.state = STATE_CONNECTED
+        _LOGGER.warning("%s connect done rssi=%s", self.address, self.rssi)
         self._notify()
 
     async def _disconnect(self, *, force_state: bool = False) -> None:
         """Disconnect from the purifier."""
+        _LOGGER.warning(
+            "%s disconnect requested force_state=%s connected=%s live_notify=%s ack_notify=%s",
+            self.address,
+            force_state,
+            self._is_connected,
+            self._live_notify_started,
+            self._ack_notify_started,
+        )
         client = self._client
         if client is not None and client.is_connected:
             await self._stop_notify(ACK_CHAR_UUID)
@@ -394,12 +460,15 @@ class AC500Device:
             label = characteristic_uuid
 
         try:
+            _LOGGER.warning("%s start_notify %s", self.address, label)
             await self._client.start_notify(characteristic_uuid, callback)
         except Exception as err:
             self.last_error = f"Could not enable {label} notifications: {err}"
+            _LOGGER.exception("%s start_notify %s failed: %s", self.address, label, err)
             raise AC500CommunicationError(self.last_error) from err
 
         self._mark_notify_started(characteristic_uuid)
+        _LOGGER.warning("%s start_notify %s done", self.address, label)
 
     def _mark_notify_started(self, characteristic_uuid: str) -> None:
         """Mark one notification subscription as active."""
@@ -423,16 +492,19 @@ class AC500Device:
             self._ack_notify_started = False
 
         with contextlib.suppress(Exception):
+            _LOGGER.warning("%s stop_notify %s", self.address, characteristic_uuid)
             await self._client.stop_notify(characteristic_uuid)
 
     async def _initialize_session(self) -> AC500Status | None:
         """Run the lightweight status session from the working implementations."""
+        _LOGGER.warning("%s initialize session", self.address)
         await self._write_command(0xAF, 0x00, 0x01)
         await asyncio.sleep(0.2)
         return await self._request_status()
 
     async def _enter_control_mode(self) -> AC500Status | None:
         """Enter the observed control mode before sending commands."""
+        _LOGGER.warning("%s enter control mode", self.address)
         start_counter = self._last_seen_status_counter
         await self._write_command(0xAF, 0x00, 0x01)
         await asyncio.sleep(0.12)
@@ -453,6 +525,7 @@ class AC500Device:
 
     async def _request_status(self) -> AC500Status | None:
         """Request one live status notification."""
+        _LOGGER.warning("%s request status", self.address)
         self._live_event.clear()
         await self._write_command(0xA2, 0x00, 0x03)
         try:
@@ -469,7 +542,7 @@ class AC500Device:
             raise AC500CommunicationError("BLE client is not connected")
 
         frame = build_frame(opcode, arg1, arg2)
-        _LOGGER.debug("%s TX %s", self.address, frame.hex())
+        _LOGGER.warning("%s TX %s", self.address, frame.hex())
         try:
             await self._client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
         except Exception as err:
@@ -532,7 +605,7 @@ class AC500Device:
     ) -> None:
         """Handle EF02 notifications."""
         frame = bytes(data)
-        _LOGGER.debug("%s RX live %s", self.address, frame.hex())
+        _LOGGER.warning("%s RX live %s", self.address, frame.hex())
         try:
             self.last_status = AC500Status.from_frame(frame)
         except ValueError:
@@ -552,7 +625,7 @@ class AC500Device:
     ) -> None:
         """Handle EF03 notifications."""
         self.last_ack = bytes(data)
-        _LOGGER.debug("%s RX ack %s", self.address, self.last_ack.hex())
+        _LOGGER.warning("%s RX ack %s", self.address, self.last_ack.hex())
         if is_pair_ack(self.last_ack):
             self.state = STATE_PAIR_ACK
         self._ack_event.set()
