@@ -26,6 +26,7 @@ class AC500SwitchDescription:
     value_fn: Callable[[AC500Status], bool]
     set_fn: Callable[[AC500Coordinator, bool], Awaitable[None]]
     entity_category: EntityCategory | None = None
+    device_class: str | None = None
 
 
 SWITCHES = (

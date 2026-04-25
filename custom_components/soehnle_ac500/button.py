@@ -23,6 +23,7 @@ class AC500ButtonDescription:
     translation_key: str
     icon: str
     press_fn: Callable[[AC500Coordinator], Awaitable[None]]
+    device_class: str | None = None
 
 
 BUTTONS = (
