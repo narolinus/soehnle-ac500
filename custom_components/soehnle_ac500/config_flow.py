@@ -26,6 +26,11 @@ def _is_ac500_name(name: str | None) -> bool:
     return (name or "").upper() == DEVICE_NAME
 
 
+def _entry_title(address: str) -> str:
+    """Return a config entry title that distinguishes multiple AC500 devices."""
+    return f"{DEVICE_NAME} ({address})"
+
+
 class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Soehnle AC500."""
 
@@ -63,7 +68,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
             address = _normalize_address(self._discovered_device.address)
             name = self._discovered_device.name or DEVICE_NAME
             return self.async_create_entry(
-                title=f"{DEVICE_NAME} {address[-5:]}",
+                title=_entry_title(address),
                 data={CONF_ADDRESS: address, CONF_NAME: name},
             )
 
@@ -95,7 +100,7 @@ class SoehnleAC500ConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(address)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
-                    title=f"{DEVICE_NAME} {address[-5:]}",
+                    title=_entry_title(address),
                     data={CONF_ADDRESS: address, CONF_NAME: name},
                 )
 

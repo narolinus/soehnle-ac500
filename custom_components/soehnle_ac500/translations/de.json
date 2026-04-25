@@ -1,9 +1,11 @@
 {
+  "title": "Soehnle Airclean Connect 500",
   "config": {
+    "flow_title": "{name} ({address})",
     "step": {
       "bluetooth_confirm": {
         "title": "Soehnle AC500 hinzufügen",
-        "description": "Den gefundenen Soehnle AC500 unter {address} einrichten."
+        "description": "Den gefundenen Soehnle AC500 mit der Bluetooth-Adresse {address} einrichten."
       },
       "user": {
         "title": "Soehnle AC500 hinzufügen",
@@ -11,6 +13,10 @@
         "data": {
           "address": "Bluetooth-Adresse",
           "name": "Name"
+        },
+        "data_description": {
+          "address": "Bei automatisch gefundenen Geräten wird die MAC-Adresse angezeigt, damit mehrere AC500 unterschieden werden können.",
+          "name": "Optionaler Anzeigename für diesen Luftreiniger."
         }
       }
     },

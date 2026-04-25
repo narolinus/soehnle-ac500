@@ -14,7 +14,6 @@ from homeassistant.const import (
     CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
     PERCENTAGE,
     EntityCategory,
-    UnitOfSignalStrength,
     UnitOfTemperature,
 )
 
@@ -93,7 +92,7 @@ SENSORS = (
         key="rssi",
         translation_key="rssi",
         icon=None,
-        native_unit_of_measurement=UnitOfSignalStrength.DECIBELS_MILLIWATT,
+        native_unit_of_measurement="dBm",
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda coordinator: coordinator.device.rssi,

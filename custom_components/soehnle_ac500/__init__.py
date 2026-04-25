@@ -12,6 +12,16 @@ from .coordinator import AC500Coordinator
 
 AC500ConfigEntry: TypeAlias = ConfigEntry[AC500Coordinator]
 
+# Load always-used platform modules at component import time. Home Assistant's
+# custom integration loader may otherwise report late platform imports during
+# config entry setup as blocking event-loop I/O.
+from . import binary_sensor as _binary_sensor  # noqa: E402,F401
+from . import button as _button  # noqa: E402,F401
+from . import select as _select  # noqa: E402,F401
+from . import sensor as _sensor  # noqa: E402,F401
+from . import switch as _switch  # noqa: E402,F401
+from . import text_sensor as _text_sensor  # noqa: E402,F401
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: AC500ConfigEntry) -> bool:
     """Set up Soehnle AC500 from a config entry."""
