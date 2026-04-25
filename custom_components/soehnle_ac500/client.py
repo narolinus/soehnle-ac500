@@ -460,8 +460,12 @@ class AC500Device:
             label = characteristic_uuid
 
         try:
-            _LOGGER.warning("%s start_notify %s", self.address, label)
-            await self._client.start_notify(characteristic_uuid, callback)
+            _LOGGER.warning("%s start_notify %s via StartNotify", self.address, label)
+            await self._client.start_notify(
+                characteristic_uuid,
+                callback,
+                bluez={"use_start_notify": True},
+            )
         except Exception as err:
             self.last_error = f"Could not enable {label} notifications: {err}"
             _LOGGER.exception("%s start_notify %s failed: %s", self.address, label, err)
@@ -637,6 +641,10 @@ class AC500Device:
         self.connected = False
         self.state = STATE_DISCONNECTED
         self._client = None
+        self._live_notify_started = False
+        self._ack_notify_started = False
+        self._live_event.set()
+        self._ack_event.set()
         self._notify()
 
     @callback
