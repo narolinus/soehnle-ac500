@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.const import (
@@ -23,19 +24,11 @@ from .entity import AC500Entity
 from .protocol import AC500Status
 
 
-@dataclass(frozen=True, slots=True)
-class AC500SensorDescription:
+@dataclass(frozen=True, kw_only=True)
+class AC500SensorDescription(SensorEntityDescription):
     """Describe an AC500 sensor."""
 
-    key: str
-    translation_key: str
-    icon: str | None
-    native_unit_of_measurement: str | None
-    device_class: SensorDeviceClass | None
-    state_class: SensorStateClass | None
     value_fn: Callable[[AC500Coordinator], int | float | str | None]
-    suggested_display_precision: int | None = None
-    entity_category: EntityCategory | None = None
 
 
 def _status_value(

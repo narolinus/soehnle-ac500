@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 
-from homeassistant.components.select import SelectEntity
+from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.exceptions import HomeAssistantError
 
 from .client import AC500CommunicationError
@@ -15,16 +16,13 @@ from .entity import AC500Entity
 from .protocol import FAN_LABELS, TIMER_LABELS, AC500Status
 
 
-@dataclass(frozen=True, slots=True)
-class AC500SelectDescription:
+@dataclass(frozen=True, kw_only=True)
+class AC500SelectDescription(SelectEntityDescription):
     """Describe an AC500 select."""
 
-    key: str
-    translation_key: str
-    icon: str
-    options: list[str]
     value_fn: Callable[[AC500Status], str | None]
     set_fn: Callable[[AC500Coordinator, str], Awaitable[None]]
+    options: list[str] = field(default_factory=list)
 
 
 SELECTS = (

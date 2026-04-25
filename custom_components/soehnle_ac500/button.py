@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.button import ButtonEntity
+from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 
@@ -15,15 +15,11 @@ from .coordinator import AC500Coordinator
 from .entity import AC500Entity
 
 
-@dataclass(frozen=True, slots=True)
-class AC500ButtonDescription:
+@dataclass(frozen=True, kw_only=True)
+class AC500ButtonDescription(ButtonEntityDescription):
     """Describe an AC500 button."""
 
-    key: str
-    translation_key: str
-    icon: str
     press_fn: Callable[[AC500Coordinator], Awaitable[None]]
-    device_class: str | None = None
 
 
 BUTTONS = (

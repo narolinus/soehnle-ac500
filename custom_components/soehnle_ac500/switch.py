@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 
@@ -16,17 +16,12 @@ from .entity import AC500Entity
 from .protocol import AC500Status
 
 
-@dataclass(frozen=True, slots=True)
-class AC500SwitchDescription:
+@dataclass(frozen=True, kw_only=True)
+class AC500SwitchDescription(SwitchEntityDescription):
     """Describe an AC500 switch."""
 
-    key: str
-    translation_key: str
-    icon: str
     value_fn: Callable[[AC500Status], bool]
     set_fn: Callable[[AC500Coordinator, bool], Awaitable[None]]
-    entity_category: EntityCategory | None = None
-    device_class: str | None = None
 
 
 SWITCHES = (
