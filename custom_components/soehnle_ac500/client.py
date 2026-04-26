@@ -18,9 +18,13 @@ from .const import (
     COMMAND_TIMEOUT,
     CONNECT_MAX_ATTEMPTS,
     DEVICE_NAME,
+    DOMAIN,
     LIVE_DATA_CHAR_UUID,
+    LIVE_STATUS_STALE_AFTER,
     PAIR_REQUEST_INTERVAL,
     PAIR_TIMEOUT,
+    RECONNECT_INITIAL_DELAY,
+    RECONNECT_RETRY_DELAY,
     SERVICE_UUID,
     SESSION_TIMEOUT,
     STATE_COMMAND_SENT,
@@ -98,8 +102,14 @@ class AC500Device:
         self.connected = False
         self.rssi: int | None = None
 
+    @callback
+    def async_start(self) -> None:
+        """Start the ESPHome-like persistent BLE session in the background."""
+        self._keep_connected = True
+        self._schedule_reconnect(delay=RECONNECT_INITIAL_DELAY)
+
     async def async_update(self) -> AC500Status | None:
-        """Fetch a fresh status frame, keeping the live BLE session open."""
+        """Fetch status without disturbing a healthy live BLE session."""
         async with self._lock:
             self._keep_connected = True
             opened_here = not self._is_connected
@@ -112,7 +122,14 @@ class AC500Device:
                 self._ack_notify_started,
             )
             await self._connect(notify_live=True, notify_ack=False)
-            status = await self._initialize_session()
+            if self._status_is_fresh(LIVE_STATUS_STALE_AFTER):
+                self.last_error = None
+                return self.last_status
+
+            if self.last_status is None:
+                status = await self._initialize_session()
+            else:
+                status = await self._request_status()
             self.last_error = None
             _LOGGER.warning(
                 "%s refresh session done status=%s",
@@ -126,7 +143,6 @@ class AC500Device:
         async with self._lock:
             self._keep_connected = True
             already_connected = self._is_connected
-            paired = False
             _LOGGER.warning(
                 "%s pair session start connected=%s live_notify=%s ack_notify=%s",
                 self.address,
@@ -135,19 +151,13 @@ class AC500Device:
                 self._ack_notify_started,
             )
             try:
-                if already_connected:
-                    await self._connect(
-                        notify_live=True,
-                        notify_ack=True,
-                    )
-                else:
-                    await self._disconnect(force_state=True)
+                if not already_connected:
                     await self._reset_bluez_if_live_notify_acquired()
-                    await asyncio.sleep(1.0)
-                    await self._connect(
-                        notify_live=True,
-                        notify_ack=True,
-                    )
+
+                await self._connect(
+                    notify_live=True,
+                    notify_ack=True,
+                )
                 self.state = STATE_PAIRING
                 self._notify()
 
@@ -178,18 +188,14 @@ class AC500Device:
                 await self._write_command(0xA2, 0x00, 0x01)
                 await asyncio.sleep(0.3)
                 self.state = STATE_PAIRED
-                paired = True
                 self._notify()
 
                 return await self._initialize_session()
             except AC500CommunicationError:
                 raise
             finally:
-                if not paired and not already_connected:
-                    self._keep_connected = False
-                    self._cancel_reconnect_task()
-                    self._cancel_keepalive_task()
-                    await self._disconnect()
+                if not self._is_connected:
+                    self._schedule_reconnect(delay=RECONNECT_INITIAL_DELAY)
 
     async def async_disconnect(self) -> None:
         """Disconnect from the purifier."""
@@ -203,27 +209,30 @@ class AC500Device:
         """Open a live session and keep it connected."""
         async with self._lock:
             self._keep_connected = True
-            if self._is_connected and not self._live_notify_started:
-                await self._disconnect(force_state=True)
-                await asyncio.sleep(1.0)
             await self._connect(notify_live=True, notify_ack=False)
+            if self._status_is_fresh(LIVE_STATUS_STALE_AFTER):
+                self.last_error = None
+                return self.last_status
             status = await self._initialize_session()
             self.last_error = None
             return status
 
     async def async_refresh(self) -> AC500Status | None:
         """Refresh status without disconnecting an existing session."""
-        return await self.async_update()
-
-    async def async_reconnect(self) -> AC500Status | None:
-        """Recover or refresh the live session without dropping a healthy link."""
         async with self._lock:
             self._keep_connected = True
-            if self._is_connected and self._live_notify_started:
-                return await self._initialize_session()
+            await self._connect(notify_live=True, notify_ack=False)
+            await self._enter_control_mode()
+            status = await self._request_status()
+            self.last_error = None
+            return status
 
+    async def async_reconnect(self) -> AC500Status | None:
+        """Rebuild the live session explicitly."""
+        async with self._lock:
+            self._keep_connected = True
             await self._disconnect(force_state=True)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
             await self._connect(notify_live=True, notify_ack=False)
             return await self._initialize_session()
 
@@ -401,80 +410,117 @@ class AC500Device:
             self._is_connected,
         )
         if self._is_connected:
-            if notify_live:
-                await self._start_status_notifications()
-                self._keep_connected = True
-                self._schedule_keepalive()
-            if notify_ack:
-                await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
-            self.connected = True
+            await self._ensure_notifications(
+                notify_live=notify_live,
+                notify_ack=notify_ack,
+            )
             return
 
-        ble_device = async_ble_device_from_address(
-            self.hass,
-            self.address,
-            connectable=True,
-        )
-        if ble_device is None:
-            _LOGGER.warning("%s no connectable bluetooth device found in HA cache", self.address)
-            raise AC500CommunicationError(
-                f"{self.name} is not currently visible to Home Assistant Bluetooth"
+        async with self._connect_lock():
+            if self._is_connected:
+                await self._ensure_notifications(
+                    notify_live=notify_live,
+                    notify_ack=notify_ack,
+                )
+                return
+
+            ble_device = async_ble_device_from_address(
+                self.hass,
+                self.address,
+                connectable=True,
             )
-
-        self.rssi = getattr(ble_device, "rssi", None)
-
-        try:
-            self._connecting = True
-            self._client = await establish_connection(
-                BleakClientWithServiceCache,
-                ble_device,
-                self.name or DEVICE_NAME,
-                self._handle_disconnect,
-                ble_device_callback=lambda: async_ble_device_from_address(
-                    self.hass,
+            if ble_device is None:
+                _LOGGER.warning(
+                    "%s no connectable bluetooth device found in HA cache",
                     self.address,
-                    connectable=True,
-                ),
-                max_attempts=CONNECT_MAX_ATTEMPTS,
-                use_services_cache=False,
-                timeout=SESSION_TIMEOUT,
-            )
-            if notify_live:
-                await self._start_status_notifications()
-            if notify_ack:
-                await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
-        except (
-            BleakError,
-            TimeoutError,
-            asyncio.TimeoutError,
-            AC500CommunicationError,
-        ) as err:
-            if self._client is not None and self._client.is_connected:
-                with contextlib.suppress(Exception):
-                    await self._client.disconnect()
-            self._client = None
-            self._live_notify_started = False
-            self._ack_notify_started = False
-            if self.state != STATE_STATUS_UNAVAILABLE:
-                self.last_error = str(err)
+                )
+                self.last_error = (
+                    f"{self.name} is not currently visible to Home Assistant Bluetooth"
+                )
                 self.state = STATE_DISCONNECTED
-            self.connected = False
-            if isinstance(err, AC500CommunicationError):
-                _LOGGER.warning("%s connect failed: %s", self.address, err)
-            else:
-                _LOGGER.exception("%s connect failed: %s", self.address, err)
-            self._notify()
-            raise AC500CommunicationError(str(err)) from err
-        finally:
-            self._connecting = False
+                self.connected = False
+                self._notify()
+                raise AC500CommunicationError(
+                    self.last_error
+                )
+
+            self.rssi = getattr(ble_device, "rssi", None)
+
+            try:
+                self._connecting = True
+                self._client = await establish_connection(
+                    BleakClientWithServiceCache,
+                    ble_device,
+                    self.name or DEVICE_NAME,
+                    self._handle_disconnect,
+                    ble_device_callback=lambda: async_ble_device_from_address(
+                        self.hass,
+                        self.address,
+                        connectable=True,
+                    ),
+                    max_attempts=CONNECT_MAX_ATTEMPTS,
+                    use_services_cache=False,
+                    timeout=SESSION_TIMEOUT,
+                )
+                await self._ensure_notifications(
+                    notify_live=notify_live,
+                    notify_ack=notify_ack,
+                )
+            except (
+                BleakError,
+                TimeoutError,
+                asyncio.TimeoutError,
+                AC500CommunicationError,
+            ) as err:
+                if self._client is not None and self._client.is_connected:
+                    with contextlib.suppress(Exception):
+                        await self._client.disconnect()
+                self._client = None
+                self._live_notify_started = False
+                self._ack_notify_started = False
+                if self.state != STATE_STATUS_UNAVAILABLE:
+                    self.last_error = str(err)
+                    self.state = STATE_DISCONNECTED
+                self.connected = False
+                if isinstance(err, AC500CommunicationError):
+                    _LOGGER.warning("%s connect failed: %s", self.address, err)
+                else:
+                    _LOGGER.exception("%s connect failed: %s", self.address, err)
+                self._notify()
+                if self._keep_connected:
+                    self._schedule_reconnect(delay=RECONNECT_RETRY_DELAY)
+                raise AC500CommunicationError(str(err)) from err
+            finally:
+                self._connecting = False
 
         self.connected = True
-        if notify_live:
-            self._keep_connected = True
-            self._schedule_keepalive()
         self.state = STATE_CONNECTED
         _LOGGER.warning("%s connect done rssi=%s", self.address, self.rssi)
         self._notify()
+
+    async def _ensure_notifications(
+        self,
+        *,
+        notify_live: bool,
+        notify_ack: bool,
+    ) -> None:
+        """Subscribe to requested notifications on the current connection."""
+        if notify_live:
+            await self._start_status_notifications()
+            self._keep_connected = True
+            self._schedule_keepalive()
+        if notify_ack:
+            await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
+        self.connected = True
+
+    def _connect_lock(self) -> asyncio.Lock:
+        """Return a shared lock for adapter connection attempts."""
+        domain_data = self.hass.data.setdefault(DOMAIN, {})
+        lock = domain_data.get("connect_lock")
+        if lock is None:
+            lock = asyncio.Lock()
+            domain_data["connect_lock"] = lock
+        return lock
 
     async def _start_status_notifications(self) -> None:
         """Start live status notifications on EF02."""
@@ -684,6 +730,12 @@ class AC500Device:
     def _is_connected(self) -> bool:
         """Return true if a BLE connection is open."""
         return self._client is not None and self._client.is_connected
+
+    def _status_is_fresh(self, max_age: float) -> bool:
+        """Return true if the latest live frame is recent enough to reuse."""
+        if self.last_status is None or self._last_status_seen_at <= 0:
+            return False
+        return self.hass.loop.time() - self._last_status_seen_at <= max_age
 
     async def _start_notify(
         self,
@@ -998,15 +1050,14 @@ class AC500Device:
         self._keepalive_task = None
 
     @callback
-    def _schedule_reconnect(self) -> None:
+    def _schedule_reconnect(self, delay: float = RECONNECT_INITIAL_DELAY) -> None:
         """Schedule ESPHome-like automatic reconnect after an unexpected drop."""
         if self._reconnect_task is not None and not self._reconnect_task.done():
             return
-        self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
+        self._reconnect_task = self.hass.async_create_task(self._reconnect_loop(delay))
 
-    async def _reconnect_loop(self) -> None:
+    async def _reconnect_loop(self, delay: float) -> None:
         """Reconnect the live BLE session while the integration wants it open."""
-        delay = 2.0
         while self._keep_connected:
             await asyncio.sleep(delay)
             if self._is_connected:
@@ -1029,7 +1080,7 @@ class AC500Device:
                     self.state = STATE_DISCONNECTED
                     self.connected = False
                     self._notify()
-                    delay = 20.0
+                    delay = RECONNECT_RETRY_DELAY
 
     @callback
     def _schedule_keepalive(self) -> None:
@@ -1041,19 +1092,19 @@ class AC500Device:
     async def _keepalive_loop(self) -> None:
         """Request status if live notifications stall before BlueZ disconnects."""
         while self._keep_connected:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(LIVE_STATUS_STALE_AFTER)
             if not self._is_connected or self._lock.locked():
                 continue
 
             age = self.hass.loop.time() - self._last_status_seen_at
-            if self._last_status_seen_at > 0 and age <= 5.0:
+            if self._last_status_seen_at > 0 and age <= LIVE_STATUS_STALE_AFTER:
                 continue
 
             async with self._lock:
                 if not self._keep_connected or not self._is_connected:
                     continue
                 age = self.hass.loop.time() - self._last_status_seen_at
-                if self._last_status_seen_at > 0 and age <= 5.0:
+                if self._last_status_seen_at > 0 and age <= LIVE_STATUS_STALE_AFTER:
                     continue
                 try:
                     _LOGGER.warning(

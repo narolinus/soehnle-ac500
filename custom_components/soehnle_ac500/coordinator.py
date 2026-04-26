@@ -49,6 +49,11 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
         """Push BLE notification updates into HA entities."""
         self.async_set_updated_data(self.device.last_status)
 
+    @callback
+    def async_start(self) -> None:
+        """Start the persistent AC500 BLE session."""
+        self.device.async_start()
+
     async def async_pair(self) -> None:
         """Run the AC500 pair action."""
         _LOGGER.warning("AC500 pair requested for %s", self.device.address)
