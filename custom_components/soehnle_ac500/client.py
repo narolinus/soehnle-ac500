@@ -19,7 +19,6 @@ from .const import (
     CONNECT_MAX_ATTEMPTS,
     DEVICE_NAME,
     LIVE_DATA_CHAR_UUID,
-    PAIR_CONNECT_MAX_ATTEMPTS,
     PAIR_REQUEST_INTERVAL,
     PAIR_TIMEOUT,
     SERVICE_UUID,
@@ -123,7 +122,7 @@ class AC500Device:
             return status
 
     async def async_pair(self) -> AC500Status | None:
-        """Run BLE pairing, then the observed proprietary AC500 handshake."""
+        """Run the observed proprietary AC500 pairing handshake."""
         async with self._lock:
             self._keep_connected = True
             already_connected = self._is_connected
@@ -140,7 +139,6 @@ class AC500Device:
                     await self._connect(
                         notify_live=True,
                         notify_ack=True,
-                        pair_before_connect=False,
                     )
                 else:
                     await self._disconnect(force_state=True)
@@ -149,15 +147,14 @@ class AC500Device:
                     await self._connect(
                         notify_live=True,
                         notify_ack=True,
-                        pair_before_connect=True,
                     )
                 self.state = STATE_PAIRING
                 self._notify()
 
-                pair_method = getattr(self._client, "pair", None)
-                if callable(pair_method):
-                    with contextlib.suppress(Exception):
-                        await pair_method()
+                _LOGGER.warning(
+                    "%s running AC500 EF03 handshake without BlueZ Pair()",
+                    self.address,
+                )
 
                 expected = build_frame(0xA2, 0x00, 0x02)
                 self.last_ack = None
@@ -394,15 +391,13 @@ class AC500Device:
         *,
         notify_live: bool,
         notify_ack: bool,
-        pair_before_connect: bool = False,
     ) -> None:
         """Open a BLE connection and subscribe to the requested notifications."""
         _LOGGER.warning(
-            "%s connect requested notify_live=%s notify_ack=%s pair_before_connect=%s connected=%s",
+            "%s connect requested notify_live=%s notify_ack=%s connected=%s",
             self.address,
             notify_live,
             notify_ack,
-            pair_before_connect,
             self._is_connected,
         )
         if self._is_connected:
@@ -440,14 +435,9 @@ class AC500Device:
                     self.address,
                     connectable=True,
                 ),
-                max_attempts=(
-                    PAIR_CONNECT_MAX_ATTEMPTS
-                    if pair_before_connect
-                    else CONNECT_MAX_ATTEMPTS
-                ),
+                max_attempts=CONNECT_MAX_ATTEMPTS,
                 use_services_cache=False,
-                timeout=30.0 if pair_before_connect else SESSION_TIMEOUT,
-                pair=pair_before_connect,
+                timeout=SESSION_TIMEOUT,
             )
             if notify_live:
                 await self._start_status_notifications()
@@ -812,6 +802,7 @@ class AC500Device:
             await self._client.write_gatt_char(WRITE_CHAR_UUID, frame, response=True)
         except Exception as err:
             self.last_error = str(err)
+            self._notify()
             raise AC500CommunicationError(str(err)) from err
 
     async def _wait_for_ack(
