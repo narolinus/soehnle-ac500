@@ -94,7 +94,7 @@ class AC500Device:
         self.rssi: int | None = None
 
     async def async_update(self) -> AC500Status | None:
-        """Fetch a fresh status frame in a short BLE session."""
+        """Fetch a fresh status frame, keeping the live BLE session open."""
         async with self._lock:
             opened_here = not self._is_connected
             _LOGGER.warning(
@@ -105,23 +105,20 @@ class AC500Device:
                 self._live_notify_started,
                 self._ack_notify_started,
             )
-            try:
-                await self._connect(notify_live=True, notify_ack=False)
-                status = await self._initialize_session()
-                self.last_error = None
-                _LOGGER.warning(
-                    "%s refresh session done status=%s",
-                    self.address,
-                    status.raw_frame_hex if status else None,
-                )
-                return status
-            finally:
-                if opened_here:
-                    await self._disconnect()
+            await self._connect(notify_live=True, notify_ack=False)
+            status = await self._initialize_session()
+            self.last_error = None
+            _LOGGER.warning(
+                "%s refresh session done status=%s",
+                self.address,
+                status.raw_frame_hex if status else None,
+            )
+            return status
 
     async def async_pair(self) -> AC500Status | None:
         """Run BLE pairing, then the observed proprietary AC500 handshake."""
         async with self._lock:
+            already_connected = self._is_connected
             paired = False
             _LOGGER.warning(
                 "%s pair session start connected=%s live_notify=%s ack_notify=%s",
@@ -131,14 +128,21 @@ class AC500Device:
                 self._ack_notify_started,
             )
             try:
-                await self._disconnect(force_state=True)
-                await self._reset_bluez_if_live_notify_acquired()
-                await asyncio.sleep(1.0)
-                await self._connect(
-                    notify_live=True,
-                    notify_ack=True,
-                    pair_before_connect=True,
-                )
+                if already_connected:
+                    await self._connect(
+                        notify_live=True,
+                        notify_ack=True,
+                        pair_before_connect=False,
+                    )
+                else:
+                    await self._disconnect(force_state=True)
+                    await self._reset_bluez_if_live_notify_acquired()
+                    await asyncio.sleep(1.0)
+                    await self._connect(
+                        notify_live=True,
+                        notify_ack=True,
+                        pair_before_connect=True,
+                    )
                 self.state = STATE_PAIRING
                 self._notify()
 
@@ -176,7 +180,7 @@ class AC500Device:
             except AC500CommunicationError:
                 raise
             finally:
-                if not paired:
+                if not paired and not already_connected:
                     await self._disconnect()
 
     async def async_disconnect(self) -> None:
@@ -265,34 +269,30 @@ class AC500Device:
                 opened_here,
                 self._is_connected,
             )
-            try:
-                await self._connect(notify_live=True, notify_ack=False)
-                await self._enter_control_mode()
+            await self._connect(notify_live=True, notify_ack=False)
+            await self._enter_control_mode()
 
-                if self.last_status is not None and self.last_status.auto_enabled:
-                    await self._write_command(*AUTO_COMMANDS[False])
-                    await self._wait_for_status(
-                        lambda status: not status.auto_enabled,
-                        COMMAND_TIMEOUT,
-                    )
-                    await asyncio.sleep(0.25)
-
-                await self._write_command(0x02, 0x00, fan)
-                status = await self._wait_for_status(
-                    lambda item: item.fan_raw == fan and not item.auto_enabled,
+            if self.last_status is not None and self.last_status.auto_enabled:
+                await self._write_command(*AUTO_COMMANDS[False])
+                await self._wait_for_status(
+                    lambda status: not status.auto_enabled,
                     COMMAND_TIMEOUT,
                 )
-                if status is None:
-                    self.state = STATE_COMMAND_TIMEOUT
-                    status = await self._request_status()
-                else:
-                    self.state = STATE_COMMAND_SENT
-                self.last_error = None
-                self._notify()
-                return status
-            finally:
-                if opened_here:
-                    await self._disconnect()
+                await asyncio.sleep(0.25)
+
+            await self._write_command(0x02, 0x00, fan)
+            status = await self._wait_for_status(
+                lambda item: item.fan_raw == fan and not item.auto_enabled,
+                COMMAND_TIMEOUT,
+            )
+            if status is None:
+                self.state = STATE_COMMAND_SENT
+                status = self.last_status
+            else:
+                self.state = STATE_COMMAND_SENT
+            self.last_error = None
+            self._notify()
+            return status
 
     async def async_set_timer(self, option: str) -> AC500Status | None:
         """Set the timer option."""
@@ -333,22 +333,18 @@ class AC500Device:
                 opened_here,
                 self._is_connected,
             )
-            try:
-                await self._connect(notify_live=True, notify_ack=False)
-                await self._enter_control_mode()
-                await self._write_command(opcode, arg1, arg2)
-                status = await self._wait_for_status(predicate, COMMAND_TIMEOUT)
-                if status is None:
-                    self.state = STATE_COMMAND_TIMEOUT
-                    status = await self._request_status()
-                else:
-                    self.state = STATE_COMMAND_SENT
-                self.last_error = None
-                self._notify()
-                return status
-            finally:
-                if opened_here:
-                    await self._disconnect()
+            await self._connect(notify_live=True, notify_ack=False)
+            await self._enter_control_mode()
+            await self._write_command(opcode, arg1, arg2)
+            status = await self._wait_for_status(predicate, COMMAND_TIMEOUT)
+            if status is None:
+                self.state = STATE_COMMAND_SENT
+                status = self.last_status
+            else:
+                self.state = STATE_COMMAND_SENT
+            self.last_error = None
+            self._notify()
+            return status
 
     async def _connect(
         self,
@@ -845,7 +841,7 @@ class AC500Device:
     ) -> None:
         """Handle EF02 notifications."""
         frame = bytes(data)
-        _LOGGER.warning("%s RX live %s", self.address, frame.hex())
+        _LOGGER.debug("%s RX live %s", self.address, frame.hex())
         try:
             self.last_status = AC500Status.from_frame(frame)
         except ValueError:
