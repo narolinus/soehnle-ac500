@@ -43,6 +43,9 @@
       },
       "reconnect": {
         "name": "Reconnect"
+      },
+      "reset_bluetooth_cache": {
+        "name": "Reset Bluetooth cache"
       }
     },
     "select": {

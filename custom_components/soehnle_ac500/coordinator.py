@@ -52,6 +52,23 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
     async def async_pair(self) -> None:
         """Run the AC500 pair action."""
         _LOGGER.warning("AC500 pair requested for %s", self.device.address)
+        self._raise_if_busy()
+        self.hass.async_create_task(
+            self.hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "Soehnle AC500 Pairing",
+                    "message": (
+                        f"{self.name}: Die Pairing-Aktion sendet jetzt fuer "
+                        "kurze Zeit wiederholt Pairing-Anfragen. Bitte die "
+                        "Bluetooth-Taste am Luftreiniger druecken."
+                    ),
+                    "notification_id": f"soehnle_ac500_pair_{self.device.address}",
+                },
+                blocking=False,
+            )
+        )
         status = await self.device.async_pair()
         if status is not None:
             self.async_set_updated_data(status)
@@ -61,48 +78,71 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
     async def async_reconnect(self) -> None:
         """Run the reconnect action."""
         _LOGGER.warning("AC500 reconnect requested for %s", self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_reconnect())
+
+    async def async_reset_bluetooth_cache(self) -> None:
+        """Reset the cached BlueZ device object."""
+        _LOGGER.warning("AC500 bluetooth cache reset requested for %s", self.device.address)
+        self._raise_if_busy()
+        await self.device.async_reset_bluetooth_cache()
+        self.async_update_listeners()
 
     async def async_refresh(self) -> None:
         """Run an explicit refresh action."""
         _LOGGER.warning("AC500 refresh requested for %s", self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_refresh())
 
     async def async_set_power(self, enabled: bool) -> None:
         """Set power."""
         _LOGGER.warning("AC500 power=%s requested for %s", enabled, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_power(enabled))
 
     async def async_set_uv(self, enabled: bool) -> None:
         """Set UV-C."""
         _LOGGER.warning("AC500 uv=%s requested for %s", enabled, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_uv(enabled))
 
     async def async_set_auto(self, enabled: bool) -> None:
         """Set automatic mode."""
         _LOGGER.warning("AC500 auto=%s requested for %s", enabled, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_auto(enabled))
 
     async def async_set_night(self, enabled: bool) -> None:
         """Set night mode."""
         _LOGGER.warning("AC500 night=%s requested for %s", enabled, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_night(enabled))
 
     async def async_set_buzzer(self, enabled: bool) -> None:
         """Set buzzer."""
         _LOGGER.warning("AC500 buzzer=%s requested for %s", enabled, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_buzzer(enabled))
 
     async def async_set_fan_mode(self, mode: str) -> None:
         """Set fan mode."""
         _LOGGER.warning("AC500 fan_mode=%s requested for %s", mode, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_fan_mode(mode))
 
     async def async_set_timer(self, option: str) -> None:
         """Set timer."""
         _LOGGER.warning("AC500 timer=%s requested for %s", option, self.device.address)
+        self._raise_if_busy()
         self.async_set_updated_data(await self.device.async_set_timer(option))
 
     async def async_shutdown(self) -> None:
         """Unload coordinator resources."""
         await self.device.async_shutdown()
+
+    def _raise_if_busy(self) -> None:
+        """Reject overlapping service calls instead of queuing them."""
+        if self.device.busy:
+            raise AC500CommunicationError(
+                f"{self.name} is already running a Bluetooth operation"
+            )

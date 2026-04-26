@@ -43,6 +43,9 @@
       },
       "reconnect": {
         "name": "Neu verbinden"
+      },
+      "reset_bluetooth_cache": {
+        "name": "Bluetooth-Cache zurücksetzen"
       }
     },
     "select": {

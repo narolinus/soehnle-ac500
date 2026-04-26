@@ -44,6 +44,12 @@ BUTTONS = (
         icon="mdi:bluetooth-transfer",
         press_fn=lambda coordinator: coordinator.async_reconnect(),
     ),
+    AC500ButtonDescription(
+        key="reset_bluetooth_cache",
+        translation_key="reset_bluetooth_cache",
+        icon="mdi:bluetooth-off",
+        press_fn=lambda coordinator: coordinator.async_reset_bluetooth_cache(),
+    ),
 )
 
 
@@ -69,7 +75,7 @@ class AC500Button(AC500Entity, ButtonEntity):
         self.entity_description = description
         self._attr_translation_key = description.translation_key
         self._attr_icon = description.icon
-        if description.key == "pair":
+        if description.key in {"pair", "reset_bluetooth_cache"}:
             self._attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:

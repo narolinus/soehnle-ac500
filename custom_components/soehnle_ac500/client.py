@@ -18,6 +18,7 @@ from .const import (
     COMMAND_TIMEOUT,
     DEVICE_NAME,
     LIVE_DATA_CHAR_UUID,
+    PAIR_REQUEST_INTERVAL,
     PAIR_TIMEOUT,
     SERVICE_UUID,
     SESSION_TIMEOUT,
@@ -141,9 +142,8 @@ class AC500Device:
                 expected = build_frame(0xA2, 0x00, 0x02)
                 self.last_ack = None
                 self._ack_event.clear()
-                await self._write_command(0xA2, 0x00, 0x03)
 
-                ack = await self._wait_for_ack(lambda data: data == expected, PAIR_TIMEOUT)
+                ack = await self._send_pair_requests_until_ack(expected)
                 _LOGGER.warning(
                     "%s pair ack result=%s expected=%s",
                     self.address,
@@ -211,6 +211,16 @@ class AC500Device:
             await asyncio.sleep(1.0)
             await self._connect(notify_live=True, notify_ack=False)
             return await self._initialize_session()
+
+    async def async_reset_bluetooth_cache(self) -> None:
+        """Remove the BlueZ device object to clear stale notify state."""
+        async with self._lock:
+            await self._disconnect(force_state=True)
+            await self._remove_bluez_device()
+            self.last_ack = None
+            self.last_status = None
+            self.last_error = "Bluetooth cache reset; wait for rediscovery and pair again"
+            self._notify()
 
     async def async_set_power(self, enabled: bool) -> AC500Status | None:
         """Turn the purifier power on or off."""
@@ -303,6 +313,11 @@ class AC500Device:
         """Close an open BLE connection."""
         async with self._lock:
             await self._disconnect()
+
+    @property
+    def busy(self) -> bool:
+        """Return true if a BLE operation is already running."""
+        return self._lock.locked()
 
     async def _run_command(
         self,
@@ -446,6 +461,80 @@ class AC500Device:
             self.state = STATE_DISCONNECTED
         self._notify()
 
+    async def _remove_bluez_device(self) -> None:
+        """Remove this device from BlueZ via D-Bus."""
+        try:
+            from dbus_fast import BusType, Message, MessageType
+            from dbus_fast.aio import MessageBus
+        except ImportError as err:
+            raise AC500CommunicationError("dbus-fast is not available") from err
+
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            objects_reply = await bus.call(
+                Message(
+                    destination="org.bluez",
+                    path="/",
+                    interface="org.freedesktop.DBus.ObjectManager",
+                    member="GetManagedObjects",
+                )
+            )
+            if objects_reply.message_type == MessageType.ERROR:
+                raise AC500CommunicationError(str(objects_reply.body[0]))
+
+            device_path = self._bluez_device_path(self.address)
+            adapter_path = "/org/bluez/hci0"
+
+            for path, interfaces in objects_reply.body[0].items():
+                device = interfaces.get("org.bluez.Device1")
+                if device is None:
+                    continue
+                address = self._dbus_value(device.get("Address"))
+                if str(address).upper() != self.address.upper():
+                    continue
+                device_path = path
+                adapter_path = str(
+                    self._dbus_value(device.get("Adapter")) or adapter_path
+                )
+                break
+
+            _LOGGER.warning(
+                "%s removing BlueZ device path=%s adapter=%s",
+                self.address,
+                device_path,
+                adapter_path,
+            )
+            remove_reply = await bus.call(
+                Message(
+                    destination="org.bluez",
+                    path=adapter_path,
+                    interface="org.bluez.Adapter1",
+                    member="RemoveDevice",
+                    signature="o",
+                    body=[device_path],
+                )
+            )
+            if remove_reply.message_type == MessageType.ERROR:
+                raise AC500CommunicationError(str(remove_reply.body[0]))
+        except AC500CommunicationError:
+            raise
+        except Exception as err:
+            raise AC500CommunicationError(f"Could not reset BlueZ device: {err}") from err
+        finally:
+            if bus is not None:
+                bus.disconnect()
+
+    @staticmethod
+    def _dbus_value(value):
+        """Unwrap dbus-fast Variant values."""
+        return getattr(value, "value", value)
+
+    @staticmethod
+    def _bluez_device_path(address: str) -> str:
+        """Return the conventional BlueZ object path for a BLE address."""
+        return f"/org/bluez/hci0/dev_{address.replace(':', '_').upper()}"
+
     @property
     def _is_connected(self) -> bool:
         """Return true if a BLE connection is open."""
@@ -587,6 +676,34 @@ class AC500Device:
                 return self.last_ack
             finally:
                 self._ack_event.clear()
+
+    async def _send_pair_requests_until_ack(self, expected: bytes) -> bytes | None:
+        """Send repeated pairing requests while waiting for the device button."""
+        deadline = asyncio.get_running_loop().time() + PAIR_TIMEOUT
+        attempt = 0
+
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0 or not self._is_connected:
+                return self.last_ack
+
+            attempt += 1
+            self.last_ack = None
+            self._ack_event.clear()
+            _LOGGER.warning(
+                "%s pair request attempt=%s remaining=%.1fs; press the device bluetooth button",
+                self.address,
+                attempt,
+                remaining,
+            )
+            await self._write_command(0xA2, 0x00, 0x03)
+
+            ack = await self._wait_for_ack(
+                lambda data: data == expected,
+                min(PAIR_REQUEST_INTERVAL, remaining),
+            )
+            if ack == expected:
+                return ack
 
     async def _wait_for_status(
         self,
