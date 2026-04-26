@@ -87,6 +87,7 @@ class AC500Device:
         self._ack_notify_started = False
         self._keep_connected = False
         self._intentional_disconnect = False
+        self._connecting = False
         self._reconnect_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
         self._last_status_seen_at = 0.0
@@ -295,23 +296,29 @@ class AC500Device:
             await self._enter_control_mode()
 
             if self.last_status is not None and self.last_status.auto_enabled:
+                wait_from = self._last_seen_status_counter
                 await self._write_command(*AUTO_COMMANDS[False])
                 await self._wait_for_status(
                     lambda status: not status.auto_enabled,
                     COMMAND_TIMEOUT,
+                    since_counter=wait_from,
                 )
                 await asyncio.sleep(0.25)
 
+            wait_from = self._last_seen_status_counter
             await self._write_command(0x02, 0x00, fan)
             status = await self._wait_for_status(
                 lambda item: item.fan_raw == fan and not item.auto_enabled,
                 COMMAND_TIMEOUT,
+                since_counter=wait_from,
             )
             if status is None:
-                self.state = STATE_COMMAND_SENT
-                status = self.last_status
-            else:
-                self.state = STATE_COMMAND_SENT
+                self.state = STATE_COMMAND_TIMEOUT
+                self.last_error = f"Fan mode {mode} was not confirmed by live status"
+                self._notify()
+                raise AC500CommunicationError(self.last_error)
+
+            self.state = STATE_COMMAND_SENT
             self.last_error = None
             self._notify()
             return status
@@ -361,13 +368,23 @@ class AC500Device:
             )
             await self._connect(notify_live=True, notify_ack=False)
             await self._enter_control_mode()
+            wait_from = self._last_seen_status_counter
             await self._write_command(opcode, arg1, arg2)
-            status = await self._wait_for_status(predicate, COMMAND_TIMEOUT)
+            status = await self._wait_for_status(
+                predicate,
+                COMMAND_TIMEOUT,
+                since_counter=wait_from,
+            )
             if status is None:
-                self.state = STATE_COMMAND_SENT
-                status = self.last_status
-            else:
-                self.state = STATE_COMMAND_SENT
+                self.state = STATE_COMMAND_TIMEOUT
+                self.last_error = (
+                    f"Command 0x{opcode:02x} 0x{arg1:02x} 0x{arg2:02x} "
+                    "was not confirmed by live status"
+                )
+                self._notify()
+                raise AC500CommunicationError(self.last_error)
+
+            self.state = STATE_COMMAND_SENT
             self.last_error = None
             self._notify()
             return status
@@ -412,6 +429,7 @@ class AC500Device:
         self.rssi = getattr(ble_device, "rssi", None)
 
         try:
+            self._connecting = True
             self._client = await establish_connection(
                 BleakClientWithServiceCache,
                 ble_device,
@@ -457,6 +475,8 @@ class AC500Device:
                 _LOGGER.exception("%s connect failed: %s", self.address, err)
             self._notify()
             raise AC500CommunicationError(str(err)) from err
+        finally:
+            self._connecting = False
 
         self.connected = True
         if notify_live:
@@ -849,25 +869,54 @@ class AC500Device:
         self,
         predicate: Callable[[AC500Status], bool],
         timeout: float,
+        *,
+        since_counter: int | None = None,
     ) -> AC500Status | None:
-        """Wait for a status matching a predicate, polling if notifications stall."""
-        deadline = asyncio.get_running_loop().time() + timeout
+        """Wait for a matching status, requesting status only if no live frame arrives."""
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        deadline = start_time + timeout
+        start_counter = (
+            self._last_seen_status_counter
+            if since_counter is None
+            else since_counter
+        )
+        status_requested = False
 
         while True:
-            if self.last_status is not None and predicate(self.last_status):
+            if (
+                self.last_status is not None
+                and predicate(self.last_status)
+                and self._last_seen_status_counter != start_counter
+            ):
                 return self.last_status
 
-            remaining = deadline - asyncio.get_running_loop().time()
+            now = loop.time()
+            remaining = deadline - now
             if remaining <= 0:
-                if self.last_status is not None and predicate(self.last_status):
+                if (
+                    self.last_status is not None
+                    and predicate(self.last_status)
+                    and self._last_seen_status_counter != start_counter
+                ):
                     return self.last_status
                 return None
 
             self._live_event.clear()
             try:
-                await asyncio.wait_for(self._live_event.wait(), timeout=min(1.0, remaining))
+                await asyncio.wait_for(self._live_event.wait(), timeout=min(0.5, remaining))
             except TimeoutError:
-                await self._request_status()
+                if (
+                    self._last_seen_status_counter == start_counter
+                    and not status_requested
+                    and loop.time() - start_time >= 2.0
+                ):
+                    status_requested = True
+                    _LOGGER.warning(
+                        "%s no live frame after command; requesting status",
+                        self.address,
+                    )
+                    await self._request_status()
             finally:
                 self._live_event.clear()
 
@@ -918,7 +967,14 @@ class AC500Device:
     @callback
     def _handle_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         """Handle a BLE disconnect callback."""
-        if self._client is not None and self._client is not _client:
+        if self._client is None:
+            _LOGGER.debug(
+                "%s ignoring disconnect callback without active client connecting=%s",
+                self.address,
+                self._connecting,
+            )
+            return
+        if self._client is not _client:
             _LOGGER.debug("%s ignoring stale disconnect callback", self.address)
             return
         _LOGGER.warning(
