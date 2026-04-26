@@ -16,8 +16,10 @@ from homeassistant.core import HomeAssistant, callback
 from .const import (
     ACK_CHAR_UUID,
     COMMAND_TIMEOUT,
+    CONNECT_MAX_ATTEMPTS,
     DEVICE_NAME,
     LIVE_DATA_CHAR_UUID,
+    PAIR_CONNECT_MAX_ATTEMPTS,
     PAIR_REQUEST_INTERVAL,
     PAIR_TIMEOUT,
     SERVICE_UUID,
@@ -31,6 +33,7 @@ from .const import (
     STATE_PAIR_TIMEOUT,
     STATE_PAIRING,
     STATE_PARSE_FAILED,
+    STATE_STATUS_UNAVAILABLE,
     STATE_STATUS_RECEIVED,
     STATUS_TIMEOUT,
     WRITE_CHAR_UUID,
@@ -55,6 +58,10 @@ StatusCallback = Callable[[], None]
 
 class AC500CommunicationError(Exception):
     """Raised when communicating with an AC500 fails."""
+
+
+class AC500BusyError(AC500CommunicationError):
+    """Raised when another BLE operation is already running."""
 
 
 class AC500Device:
@@ -125,9 +132,10 @@ class AC500Device:
             )
             try:
                 await self._disconnect(force_state=True)
+                await self._reset_bluez_if_live_notify_acquired()
                 await asyncio.sleep(1.0)
                 await self._connect(
-                    notify_live=False,
+                    notify_live=True,
                     notify_ack=True,
                     pair_before_connect=True,
                 )
@@ -164,19 +172,6 @@ class AC500Device:
                 paired = True
                 self._notify()
 
-                try:
-                    await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
-                except AC500CommunicationError as err:
-                    # Pairing succeeded. Keep EF03 active and try the same status
-                    # request flow there; some BlueZ states keep EF02 acquired.
-                    self.last_error = str(err)
-                    self.state = STATE_PAIRED
-                    _LOGGER.warning(
-                        "%s pair succeeded but live setup failed, trying ack fallback: %s",
-                        self.address,
-                        err,
-                    )
-                    self._notify()
                 return await self._initialize_session()
             except AC500CommunicationError:
                 raise
@@ -402,6 +397,11 @@ class AC500Device:
                     self.address,
                     connectable=True,
                 ),
+                max_attempts=(
+                    PAIR_CONNECT_MAX_ATTEMPTS
+                    if pair_before_connect
+                    else CONNECT_MAX_ATTEMPTS
+                ),
                 use_services_cache=False,
                 timeout=30.0 if pair_before_connect else SESSION_TIMEOUT,
                 pair=pair_before_connect,
@@ -410,11 +410,26 @@ class AC500Device:
                 await self._start_status_notifications()
             if notify_ack:
                 await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
-        except (BleakError, TimeoutError, asyncio.TimeoutError, AC500CommunicationError) as err:
-            self.last_error = str(err)
-            self.state = STATE_DISCONNECTED
+        except (
+            BleakError,
+            TimeoutError,
+            asyncio.TimeoutError,
+            AC500CommunicationError,
+        ) as err:
+            if self._client is not None and self._client.is_connected:
+                with contextlib.suppress(Exception):
+                    await self._client.disconnect()
+            self._client = None
+            self._live_notify_started = False
+            self._ack_notify_started = False
+            if self.state != STATE_STATUS_UNAVAILABLE:
+                self.last_error = str(err)
+                self.state = STATE_DISCONNECTED
             self.connected = False
-            _LOGGER.exception("%s connect failed: %s", self.address, err)
+            if isinstance(err, AC500CommunicationError):
+                _LOGGER.warning("%s connect failed: %s", self.address, err)
+            else:
+                _LOGGER.exception("%s connect failed: %s", self.address, err)
             self._notify()
             raise AC500CommunicationError(str(err)) from err
 
@@ -424,17 +439,17 @@ class AC500Device:
         self._notify()
 
     async def _start_status_notifications(self) -> None:
-        """Start status notifications, falling back to EF03 if EF02 is locked."""
+        """Start live status notifications on EF02."""
         try:
             await self._start_notify(LIVE_DATA_CHAR_UUID, self._handle_live_data)
         except AC500CommunicationError as err:
-            _LOGGER.warning(
-                "%s live notifications unavailable, trying ack status fallback: %s",
-                self.address,
-                err,
+            self.state = STATE_STATUS_UNAVAILABLE
+            self.last_error = (
+                "Live status channel EF02 is unavailable. "
+                f"BlueZ reported: {err}"
             )
-            self.last_error = f"Live notifications unavailable, using ACK fallback: {err}"
-            await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
+            self._notify()
+            raise
 
     async def _disconnect(self, *, force_state: bool = False) -> None:
         """Disconnect from the purifier."""
@@ -525,6 +540,94 @@ class AC500Device:
             if bus is not None:
                 bus.disconnect()
 
+    async def _reset_bluez_if_live_notify_acquired(self) -> None:
+        """Reset BlueZ if EF02 is stuck in AcquireNotify state."""
+        try:
+            acquired = await self._bluez_live_notify_acquired()
+        except AC500CommunicationError as err:
+            _LOGGER.warning(
+                "%s could not inspect BlueZ notify state: %s",
+                self.address,
+                err,
+            )
+            return
+
+        if not acquired:
+            return
+
+        _LOGGER.warning(
+            "%s BlueZ reports EF02 NotifyAcquired=True; resetting device cache before pairing",
+            self.address,
+        )
+        self.last_error = (
+            "BlueZ had a stale EF02 notification acquisition; reset Bluetooth cache "
+            "before pairing."
+        )
+        self.state = STATE_DISCONNECTED
+        self._notify()
+        await self._remove_bluez_device()
+        await asyncio.sleep(2.0)
+
+    async def _bluez_live_notify_acquired(self) -> bool:
+        """Return true if BlueZ says EF02 notify is acquired by another client."""
+        try:
+            from dbus_fast import BusType, Message, MessageType
+            from dbus_fast.aio import MessageBus
+        except ImportError as err:
+            raise AC500CommunicationError("dbus-fast is not available") from err
+
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            reply = await bus.call(
+                Message(
+                    destination="org.bluez",
+                    path="/",
+                    interface="org.freedesktop.DBus.ObjectManager",
+                    member="GetManagedObjects",
+                )
+            )
+            if reply.message_type == MessageType.ERROR:
+                raise AC500CommunicationError(str(reply.body[0]))
+
+            device_path = self._find_bluez_device_path(reply.body[0])
+            if device_path is None:
+                return False
+
+            for _path, interfaces in reply.body[0].items():
+                characteristic = interfaces.get("org.bluez.GattCharacteristic1")
+                if characteristic is None:
+                    continue
+
+                uuid = str(self._dbus_value(characteristic.get("UUID"))).lower()
+                service = str(self._dbus_value(characteristic.get("Service")))
+                if uuid != LIVE_DATA_CHAR_UUID or not service.startswith(device_path):
+                    continue
+
+                return bool(self._dbus_value(characteristic.get("NotifyAcquired")))
+        except AC500CommunicationError:
+            raise
+        except Exception as err:
+            raise AC500CommunicationError(
+                f"Could not inspect BlueZ notify state: {err}"
+            ) from err
+        finally:
+            if bus is not None:
+                bus.disconnect()
+
+        return False
+
+    def _find_bluez_device_path(self, objects: dict) -> str | None:
+        """Find this device's BlueZ object path in managed objects."""
+        for path, interfaces in objects.items():
+            device = interfaces.get("org.bluez.Device1")
+            if device is None:
+                continue
+            address = self._dbus_value(device.get("Address"))
+            if str(address).upper() == self.address.upper():
+                return str(path)
+        return None
+
     @staticmethod
     def _dbus_value(value):
         """Unwrap dbus-fast Variant values."""
@@ -569,7 +672,7 @@ class AC500Device:
             )
         except Exception as err:
             self.last_error = f"Could not enable {label} notifications: {err}"
-            _LOGGER.exception("%s start_notify %s failed: %s", self.address, label, err)
+            _LOGGER.warning("%s start_notify %s failed: %s", self.address, label, err)
             raise AC500CommunicationError(self.last_error) from err
 
         self._mark_notify_started(characteristic_uuid)
@@ -636,6 +739,10 @@ class AC500Device:
         try:
             await asyncio.wait_for(self._live_event.wait(), timeout=STATUS_TIMEOUT)
         except TimeoutError:
+            if self.last_status is None:
+                self.last_error = "No live status frame received from EF02"
+                self.state = STATE_STATUS_UNAVAILABLE
+                self._notify()
             return self.last_status
         finally:
             self._live_event.clear()

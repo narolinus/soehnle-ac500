@@ -11,7 +11,7 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError
 
-from .client import AC500CommunicationError
+from .client import AC500BusyError, AC500CommunicationError
 from .coordinator import AC500Coordinator
 from .entity import AC500Entity
 
@@ -87,6 +87,13 @@ class AC500Button(AC500Entity, ButtonEntity):
         )
         try:
             await self.entity_description.press_fn(self.coordinator)
+        except AC500BusyError as err:
+            _LOGGER.warning(
+                "AC500 action ignored while busy: %s for %s",
+                self.entity_description.key,
+                self.coordinator.device.address,
+            )
+            raise HomeAssistantError(str(err)) from err
         except AC500CommunicationError as err:
             _LOGGER.exception(
                 "AC500 action failed: %s for %s",

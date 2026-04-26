@@ -28,3 +28,8 @@ class AC500Entity(CoordinatorEntity[AC500Coordinator]):
             model=MODEL,
             name=coordinator.config_entry.data.get(CONF_NAME, coordinator.config_entry.title),
         )
+
+    @property
+    def available(self) -> bool:
+        """Keep entities available even when the purifier is currently offline."""
+        return True

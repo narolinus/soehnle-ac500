@@ -24,7 +24,6 @@ async def async_setup_entry(hass: Any, entry: Any) -> bool:
     coordinator = AC500Coordinator(hass, entry)
     entry.runtime_data = coordinator
 
-    await coordinator.async_config_entry_first_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _LOGGER.warning(
         "soehnle_ac500 setup entry complete title=%s entry_id=%s",
