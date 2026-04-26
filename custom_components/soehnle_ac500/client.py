@@ -85,6 +85,11 @@ class AC500Device:
         self._last_seen_status_counter = 0
         self._live_notify_started = False
         self._ack_notify_started = False
+        self._keep_connected = False
+        self._intentional_disconnect = False
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._keepalive_task: asyncio.Task[None] | None = None
+        self._last_status_seen_at = 0.0
 
         self.last_status: AC500Status | None = None
         self.last_ack: bytes | None = None
@@ -96,6 +101,7 @@ class AC500Device:
     async def async_update(self) -> AC500Status | None:
         """Fetch a fresh status frame, keeping the live BLE session open."""
         async with self._lock:
+            self._keep_connected = True
             opened_here = not self._is_connected
             _LOGGER.warning(
                 "%s refresh session start opened_here=%s connected=%s live_notify=%s ack_notify=%s",
@@ -118,6 +124,7 @@ class AC500Device:
     async def async_pair(self) -> AC500Status | None:
         """Run BLE pairing, then the observed proprietary AC500 handshake."""
         async with self._lock:
+            self._keep_connected = True
             already_connected = self._is_connected
             paired = False
             _LOGGER.warning(
@@ -181,16 +188,23 @@ class AC500Device:
                 raise
             finally:
                 if not paired and not already_connected:
+                    self._keep_connected = False
+                    self._cancel_reconnect_task()
+                    self._cancel_keepalive_task()
                     await self._disconnect()
 
     async def async_disconnect(self) -> None:
         """Disconnect from the purifier."""
         async with self._lock:
+            self._keep_connected = False
+            self._cancel_reconnect_task()
+            self._cancel_keepalive_task()
             await self._disconnect(force_state=True)
 
     async def async_connect_and_update(self) -> AC500Status | None:
         """Open a live session and keep it connected."""
         async with self._lock:
+            self._keep_connected = True
             if self._is_connected and not self._live_notify_started:
                 await self._disconnect(force_state=True)
                 await asyncio.sleep(1.0)
@@ -204,8 +218,12 @@ class AC500Device:
         return await self.async_update()
 
     async def async_reconnect(self) -> AC500Status | None:
-        """Disconnect and read status again."""
+        """Recover or refresh the live session without dropping a healthy link."""
         async with self._lock:
+            self._keep_connected = True
+            if self._is_connected and self._live_notify_started:
+                return await self._initialize_session()
+
             await self._disconnect(force_state=True)
             await asyncio.sleep(1.0)
             await self._connect(notify_live=True, notify_ack=False)
@@ -214,6 +232,9 @@ class AC500Device:
     async def async_reset_bluetooth_cache(self) -> None:
         """Remove the BlueZ device object to clear stale notify state."""
         async with self._lock:
+            self._keep_connected = False
+            self._cancel_reconnect_task()
+            self._cancel_keepalive_task()
             await self._disconnect(force_state=True)
             await self._remove_bluez_device()
             self.last_ack = None
@@ -261,6 +282,7 @@ class AC500Device:
         fan = FAN_VALUES[mode]
 
         async with self._lock:
+            self._keep_connected = True
             opened_here = not self._is_connected
             _LOGGER.warning(
                 "%s fan command start mode=%s opened_here=%s connected=%s",
@@ -307,6 +329,9 @@ class AC500Device:
     async def async_shutdown(self) -> None:
         """Close an open BLE connection."""
         async with self._lock:
+            self._keep_connected = False
+            self._cancel_reconnect_task()
+            self._cancel_keepalive_task()
             await self._disconnect()
 
     @property
@@ -323,6 +348,7 @@ class AC500Device:
     ) -> AC500Status | None:
         """Run one control-mode command and refresh status."""
         async with self._lock:
+            self._keep_connected = True
             opened_here = not self._is_connected
             _LOGGER.warning(
                 "%s command start opcode=0x%02x arg1=0x%02x arg2=0x%02x opened_here=%s connected=%s",
@@ -365,8 +391,11 @@ class AC500Device:
         if self._is_connected:
             if notify_live:
                 await self._start_status_notifications()
+                self._keep_connected = True
+                self._schedule_keepalive()
             if notify_ack:
                 await self._start_notify(ACK_CHAR_UUID, self._handle_ack)
+            self.connected = True
             return
 
         ble_device = async_ble_device_from_address(
@@ -430,6 +459,9 @@ class AC500Device:
             raise AC500CommunicationError(str(err)) from err
 
         self.connected = True
+        if notify_live:
+            self._keep_connected = True
+            self._schedule_keepalive()
         self.state = STATE_CONNECTED
         _LOGGER.warning("%s connect done rssi=%s", self.address, self.rssi)
         self._notify()
@@ -459,10 +491,14 @@ class AC500Device:
         )
         client = self._client
         if client is not None and client.is_connected:
-            await self._stop_notify(ACK_CHAR_UUID)
-            await self._stop_notify(LIVE_DATA_CHAR_UUID)
-            with contextlib.suppress(Exception):
-                await client.disconnect()
+            self._intentional_disconnect = True
+            try:
+                await self._stop_notify(ACK_CHAR_UUID)
+                await self._stop_notify(LIVE_DATA_CHAR_UUID)
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
+            finally:
+                self._intentional_disconnect = False
 
         self._client = None
         self._live_notify_started = False
@@ -710,6 +746,7 @@ class AC500Device:
         """Enter the observed control mode before sending commands."""
         _LOGGER.warning("%s enter control mode", self.address)
         start_counter = self._last_seen_status_counter
+        self._live_event.clear()
         await self._write_command(0xAF, 0x00, 0x01)
         await asyncio.sleep(0.12)
         await self._write_command(0xAF, 0x00, 0x01)
@@ -717,12 +754,12 @@ class AC500Device:
         try:
             await asyncio.wait_for(self._live_event.wait(), timeout=2.0)
         except TimeoutError:
-            return await self._request_status()
+            _LOGGER.warning("%s no fresh live frame after control mode", self.address)
         finally:
             self._live_event.clear()
 
         if self._last_seen_status_counter == start_counter:
-            return await self._request_status()
+            _LOGGER.warning("%s stale live event after control mode", self.address)
 
         await asyncio.sleep(0.2)
         return self.last_status
@@ -850,6 +887,7 @@ class AC500Device:
             return
 
         self._last_seen_status_counter += 1
+        self._last_status_seen_at = self.hass.loop.time()
         self.state = STATE_STATUS_RECEIVED
         self._live_event.set()
         self._notify()
@@ -868,6 +906,7 @@ class AC500Device:
             pass
         else:
             self._last_seen_status_counter += 1
+            self._last_status_seen_at = self.hass.loop.time()
             self.state = STATE_STATUS_RECEIVED
             self._live_event.set()
 
@@ -879,6 +918,15 @@ class AC500Device:
     @callback
     def _handle_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         """Handle a BLE disconnect callback."""
+        if self._client is not None and self._client is not _client:
+            _LOGGER.debug("%s ignoring stale disconnect callback", self.address)
+            return
+        _LOGGER.warning(
+            "%s disconnected callback intentional=%s keep_connected=%s",
+            self.address,
+            self._intentional_disconnect,
+            self._keep_connected,
+        )
         self.connected = False
         self.state = STATE_DISCONNECTED
         self._client = None
@@ -887,6 +935,89 @@ class AC500Device:
         self._live_event.set()
         self._ack_event.set()
         self._notify()
+        if self._keep_connected and not self._intentional_disconnect:
+            self._schedule_reconnect()
+
+    def _cancel_reconnect_task(self) -> None:
+        """Cancel a pending automatic reconnect."""
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        self._reconnect_task = None
+
+    def _cancel_keepalive_task(self) -> None:
+        """Cancel a pending live-session keepalive."""
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+        self._keepalive_task = None
+
+    @callback
+    def _schedule_reconnect(self) -> None:
+        """Schedule ESPHome-like automatic reconnect after an unexpected drop."""
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Reconnect the live BLE session while the integration wants it open."""
+        delay = 2.0
+        while self._keep_connected:
+            await asyncio.sleep(delay)
+            if self._is_connected:
+                return
+            if self._lock.locked():
+                delay = 5.0
+                continue
+
+            async with self._lock:
+                if not self._keep_connected or self._is_connected:
+                    return
+                try:
+                    _LOGGER.warning("%s automatic reconnect attempt", self.address)
+                    await self._connect(notify_live=True, notify_ack=False)
+                    await self._initialize_session()
+                    self.last_error = None
+                    return
+                except AC500CommunicationError as err:
+                    self.last_error = f"Automatic reconnect failed: {err}"
+                    self.state = STATE_DISCONNECTED
+                    self.connected = False
+                    self._notify()
+                    delay = 20.0
+
+    @callback
+    def _schedule_keepalive(self) -> None:
+        """Schedule status keepalive while a live session should remain open."""
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        self._keepalive_task = self.hass.async_create_task(self._keepalive_loop())
+
+    async def _keepalive_loop(self) -> None:
+        """Request status if live notifications stall before BlueZ disconnects."""
+        while self._keep_connected:
+            await asyncio.sleep(5.0)
+            if not self._is_connected or self._lock.locked():
+                continue
+
+            age = self.hass.loop.time() - self._last_status_seen_at
+            if self._last_status_seen_at > 0 and age <= 5.0:
+                continue
+
+            async with self._lock:
+                if not self._keep_connected or not self._is_connected:
+                    continue
+                age = self.hass.loop.time() - self._last_status_seen_at
+                if self._last_status_seen_at > 0 and age <= 5.0:
+                    continue
+                try:
+                    _LOGGER.warning(
+                        "%s live status stalled for %.1fs; requesting keepalive status",
+                        self.address,
+                        age,
+                    )
+                    await self._request_status()
+                except AC500CommunicationError as err:
+                    self.last_error = f"Keepalive status request failed: {err}"
+                    self._notify()
 
     @callback
     def _notify(self) -> None:

@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .client import AC500BusyError, AC500CommunicationError, AC500Device
+from .client import AC500CommunicationError, AC500Device
 from .const import CONF_ADDRESS, CONF_NAME, SCAN_INTERVAL
 from .protocol import AC500Status
 
@@ -141,8 +141,9 @@ class AC500Coordinator(DataUpdateCoordinator[AC500Status | None]):
         await self.device.async_shutdown()
 
     def _raise_if_busy(self) -> None:
-        """Reject overlapping service calls instead of queuing them."""
+        """Allow overlapping HA service calls to queue on the BLE device lock."""
         if self.device.busy:
-            raise AC500BusyError(
-                f"{self.name} is already running a Bluetooth operation"
+            _LOGGER.debug(
+                "%s is already running a Bluetooth operation; queuing request",
+                self.name,
             )
